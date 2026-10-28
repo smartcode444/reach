@@ -2754,7 +2754,9 @@ version = "0.1.0"
 dependencies = [
  "image",
  "reach-core",
+ "strsim",
  "uiautomation",
+ "windows 0.62.2",
  "xcap",
 ]
 
