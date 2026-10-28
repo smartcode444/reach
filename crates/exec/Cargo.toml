@@ -5,9 +5,10 @@ edition = "2024"
 
 [dependencies]
 enigo = "0.6.1"
-handsfree-core = { version = "0.1.0", path = "../core" }
+reach-core = { version = "0.1.0", path = "../core" }
 open = "5.4.5"
 
 [lints]
 workspace = true
+
 

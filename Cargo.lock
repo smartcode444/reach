@@ -262,8 +262,8 @@ name = "audio"
 version = "0.1.0"
 dependencies = [
  "cpal",
- "handsfree-core",
  "hound",
+ "reach-core",
  "rubato",
 ]
 
@@ -534,8 +534,8 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "exec",
- "handsfree-core",
  "nlu",
+ "reach-core",
  "screen",
 ]
 
@@ -926,8 +926,8 @@ name = "exec"
 version = "0.1.0"
 dependencies = [
  "enigo",
- "handsfree-core",
  "open",
+ "reach-core",
 ]
 
 [[package]]
@@ -1173,15 +1173,6 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
-]
-
-[[package]]
-name = "handsfree-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1799,8 +1790,8 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 name = "nlu"
 version = "0.1.0"
 dependencies = [
- "handsfree-core",
  "needle-infer",
+ "reach-core",
  "regex",
  "serde_json",
  "strsim",
@@ -2601,6 +2592,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "reach-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "realfft"
 version = "3.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2752,8 +2752,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "screen"
 version = "0.1.0"
 dependencies = [
- "handsfree-core",
  "image",
+ "reach-core",
  "uiautomation",
  "xcap",
 ]
@@ -2914,7 +2914,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 name = "stt"
 version = "0.1.0"
 dependencies = [
- "handsfree-core",
+ "reach-core",
  "whisper-rs",
 ]
 

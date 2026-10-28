@@ -5,9 +5,10 @@ edition = "2024"
 
 [dependencies]
 exec = { version = "0.1.0", path = "../exec" }
-handsfree-core = { version = "0.1.0", path = "../core" }
+reach-core = { version = "0.1.0", path = "../core" }
 nlu = { version = "0.1.0", path = "../nlu" }
 screen = { version = "0.1.0", path = "../screen" }
 
 [lints]
 workspace = true
+
