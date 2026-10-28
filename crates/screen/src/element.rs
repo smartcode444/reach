@@ -1,0 +1,663 @@
+//! On-screen element representation, collection limits, and high-level element actions.
+//!
+//! Provides the [`LiveElement`] type which pairs an [`ElementSummary`] with
+//! its platform automation handle, limits for tree traversal, and high-level
+//! actions for clicking, focusing, and typing.
+
+use crate::error::ScreenError;
+use crate::label::{ControlKind, ElementSummary, MatchConfig, Resolution, rank_matches, resolve};
+use std::time::Duration;
+
+#[cfg(windows)]
+use uiautomation::core::{UIAutomation, UIElement, UITreeWalker};
+#[cfg(windows)]
+use uiautomation::patterns::{UIInvokePattern, UIValuePattern};
+#[cfg(windows)]
+use uiautomation::types::{ControlType, Handle};
+
+/// Limits for walking the on-screen UI tree to avoid excessive latency or memory use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectLimits {
+    /// Maximum depth in the accessibility hierarchy to traverse.
+    pub max_depth: usize,
+    /// Maximum total number of elements to collect before stopping.
+    pub max_elements: usize,
+    /// Maximum duration allowed for tree collection.
+    pub timeout: Duration,
+}
+
+impl Default for CollectLimits {
+    /// Documented defaults: max depth 12, max 150 elements, 1500 ms timeout.
+    fn default() -> Self {
+        Self {
+            max_depth: 12,
+            max_elements: 150,
+            timeout: Duration::from_millis(1500),
+        }
+    }
+}
+
+/// The successful method used to act on an on-screen element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionMethod {
+    /// Triggered via the UI Automation Invoke pattern.
+    InvokePattern,
+    /// Updated via the UI Automation Value pattern.
+    ValuePattern,
+    /// Focused via UI Automation SetFocus.
+    SetFocus,
+}
+
+/// The outcome of an element-targeted action (click, focus, type).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionOutcome {
+    /// Action completed successfully via an in-process accessibility pattern.
+    Done(ActionMethod),
+    /// The target name was ambiguous among multiple on-screen elements.
+    ///
+    /// Contains candidate element names (up to 3) for user disambiguation.
+    NeedsChoice(Vec<String>),
+    /// No matching element was found on screen.
+    NotFound,
+    /// UI Automation patterns were unsupported; physical mouse click is required at `(x, y)`.
+    NeedsClickAt {
+        /// X coordinate on screen.
+        x: i32,
+        /// Y coordinate on screen.
+        y: i32,
+    },
+    /// Direct text setting was unsupported; physical keyboard input is required.
+    NeedsTypeText {
+        /// Text string to be injected via keyboard.
+        text: String,
+    },
+}
+
+/// A live on-screen element with its metadata summary and backend action handle.
+#[derive(Debug)]
+pub struct LiveElement {
+    /// Metadata summary (name, kind, bounding rect, state flags).
+    pub summary: ElementSummary,
+    /// Platform UI Automation element handle on Windows.
+    #[cfg(windows)]
+    pub(crate) uia_element: Option<UIElement>,
+}
+
+impl LiveElement {
+    /// Creates a new `LiveElement` from an [`ElementSummary`] without a platform handle.
+    ///
+    /// Useful for testing pure logic without Windows accessibility dependencies.
+    ///
+    /// # Arguments
+    /// * `summary` - The element summary metadata.
+    ///
+    /// # Returns
+    /// A new `LiveElement` wrapping `summary`.
+    pub fn from_summary(summary: ElementSummary) -> Self {
+        Self {
+            summary,
+            #[cfg(windows)]
+            uia_element: None,
+        }
+    }
+
+    /// Attempts to click this element using the Invoke pattern, falling back to mouse coordinates.
+    ///
+    /// # Returns
+    /// An [`ActionOutcome`] indicating whether Invoke succeeded or physical click is needed.
+    pub fn click(&self) -> ActionOutcome {
+        #[cfg(windows)]
+        if let Some(elem) = &self.uia_element
+            && let Ok(invoke) = elem.get_pattern::<UIInvokePattern>()
+            && invoke.invoke().is_ok()
+        {
+            return ActionOutcome::Done(ActionMethod::InvokePattern);
+        }
+
+        let (x, y) = self.summary.rect.centre();
+        ActionOutcome::NeedsClickAt { x, y }
+    }
+
+    /// Attempts to focus this element via SetFocus, falling back to a click at its centre.
+    ///
+    /// # Returns
+    /// An [`ActionOutcome`] indicating whether SetFocus succeeded or physical click is needed.
+    pub fn focus(&self) -> ActionOutcome {
+        #[cfg(windows)]
+        if let Some(elem) = &self.uia_element
+            && elem.set_focus().is_ok()
+        {
+            return ActionOutcome::Done(ActionMethod::SetFocus);
+        }
+
+        let (x, y) = self.summary.rect.centre();
+        ActionOutcome::NeedsClickAt { x, y }
+    }
+
+    /// Attempts to set text directly via the Value pattern, falling back to typing.
+    ///
+    /// Never stores or logs values of password fields.
+    ///
+    /// # Arguments
+    /// * `text` - The text string to set or type.
+    ///
+    /// # Returns
+    /// An [`ActionOutcome`] indicating whether Value pattern succeeded or typing is needed.
+    pub fn type_text(&self, text: &str) -> ActionOutcome {
+        #[cfg(windows)]
+        if let Some(elem) = &self.uia_element
+            && let Ok(val) = elem.get_pattern::<UIValuePattern>()
+            && val.set_value(text).is_ok()
+        {
+            return ActionOutcome::Done(ActionMethod::ValuePattern);
+        }
+
+        // Focus first, then ask for physical keyboard typing.
+        let _ = self.focus();
+        ActionOutcome::NeedsTypeText {
+            text: text.to_owned(),
+        }
+    }
+}
+
+/// The result of collecting on-screen elements from a window hierarchy.
+#[derive(Debug)]
+pub struct CollectResult {
+    /// Collected elements with summaries and action handles.
+    pub elements: Vec<LiveElement>,
+    /// Whether collection stopped early due to depth, element count, or timeout limits.
+    pub truncated: bool,
+}
+
+/// Strategy for locating the active foreground window handle.
+pub trait ForegroundFinder {
+    /// Obtains the handle of the foreground window as a numeric address.
+    ///
+    /// # Errors
+    /// Returns [`ScreenError::NoForegroundWindow`] if no active window is available.
+    fn get_foreground_hwnd(&self) -> Result<isize, ScreenError>;
+}
+
+/// Default Windows foreground window locator using Win32 `GetForegroundWindow`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemForegroundFinder;
+
+impl ForegroundFinder for SystemForegroundFinder {
+    fn get_foreground_hwnd(&self) -> Result<isize, ScreenError> {
+        #[cfg(windows)]
+        {
+            let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+            if hwnd.0.is_null() {
+                Err(ScreenError::NoForegroundWindow)
+            } else {
+                Ok(hwnd.0 as isize)
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            Err(ScreenError::NoForegroundWindow)
+        }
+    }
+}
+
+/// Maps a Windows UI Automation [`ControlType`] to Reach's [`ControlKind`].
+#[cfg(windows)]
+fn map_control_type(ct: ControlType) -> ControlKind {
+    match ct {
+        ControlType::Button | ControlType::SplitButton => ControlKind::Button,
+        ControlType::Hyperlink => ControlKind::Link,
+        ControlType::Edit => ControlKind::Edit,
+        ControlType::CheckBox => ControlKind::CheckBox,
+        ControlType::ComboBox => ControlKind::ComboBox,
+        ControlType::MenuItem => ControlKind::MenuItem,
+        ControlType::TabItem => ControlKind::TabItem,
+        ControlType::ListItem => ControlKind::ListItem,
+        ControlType::RadioButton => ControlKind::RadioButton,
+        _ => ControlKind::Other,
+    }
+}
+
+/// Collects live elements from the active foreground window using a custom foreground finder.
+///
+/// # Arguments
+/// * `finder` - Strategy for obtaining the foreground window handle.
+/// * `limits` - Traversal budget constraints.
+///
+/// # Returns
+/// A [`CollectResult`] containing live elements and whether collection was truncated.
+///
+/// # Errors
+/// Returns [`ScreenError::NoForegroundWindow`] if no active window is found,
+/// or [`ScreenError::Automation`] if UI Automation initialization fails.
+pub fn collect_foreground_with<F: ForegroundFinder>(
+    finder: &F,
+    limits: CollectLimits,
+) -> Result<CollectResult, ScreenError> {
+    #[cfg(windows)]
+    {
+        let hwnd_val = finder.get_foreground_hwnd()?;
+        let auto = UIAutomation::new().map_err(|e| ScreenError::Automation(e.to_string()))?;
+        let root = auto
+            .element_from_handle(Handle::from(hwnd_val))
+            .map_err(|e| ScreenError::Automation(e.to_string()))?;
+        let walker = auto
+            .create_tree_walker()
+            .map_err(|e| ScreenError::Automation(e.to_string()))?;
+
+        collect_tree(&root, &walker, limits)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (finder, limits);
+        Err(ScreenError::Automation(
+            "UI Automation is only available on Windows".to_owned(),
+        ))
+    }
+}
+
+/// Collects live elements from the active foreground window using the system default finder.
+///
+/// # Arguments
+/// * `limits` - Traversal budget constraints.
+///
+/// # Returns
+/// A [`CollectResult`] containing live elements and truncation status.
+///
+/// # Errors
+/// Returns [`ScreenError`] if window retrieval or UI tree traversal fails.
+pub fn collect_foreground(limits: CollectLimits) -> Result<CollectResult, ScreenError> {
+    collect_foreground_with(&SystemForegroundFinder, limits)
+}
+
+/// Recursively traverses a UI Automation subtree within depth, count, and time bounds.
+#[cfg(windows)]
+fn collect_tree(
+    root: &UIElement,
+    walker: &UITreeWalker,
+    limits: CollectLimits,
+) -> Result<CollectResult, ScreenError> {
+    let start_time = std::time::Instant::now();
+    let mut elements = Vec::new();
+    let mut truncated = false;
+
+    // Stack holds (element, current_depth)
+    let mut stack = vec![(root.clone(), 0usize)];
+
+    while let Some((current, depth)) = stack.pop() {
+        if start_time.elapsed() >= limits.timeout {
+            truncated = true;
+            break;
+        }
+
+        if elements.len() >= limits.max_elements {
+            truncated = true;
+            break;
+        }
+
+        // Read element properties (safely handling errors with defaults).
+        let name = current.get_name().unwrap_or_default();
+        let ct = current.get_control_type().unwrap_or(ControlType::Custom);
+        let kind = map_control_type(ct);
+
+        let uia_rect = current.get_bounding_rectangle().unwrap_or_default();
+        let rect = crate::label::Rect {
+            left: uia_rect.get_left(),
+            top: uia_rect.get_top(),
+            right: uia_rect.get_right(),
+            bottom: uia_rect.get_bottom(),
+        };
+
+        let enabled = current.is_enabled().unwrap_or(true);
+        let offscreen = current.is_offscreen().unwrap_or(false);
+        let is_password = current.is_password().unwrap_or(false);
+
+        let summary = ElementSummary {
+            name,
+            kind,
+            rect,
+            enabled,
+            offscreen,
+            is_password,
+        };
+
+        elements.push(LiveElement {
+            summary,
+            uia_element: Some(current.clone()),
+        });
+
+        // Collect children if within depth limits.
+        if depth < limits.max_depth {
+            if let Some(children) = walker.get_children(&current) {
+                // Push children in reverse order so first child is popped first.
+                for child in children.into_iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
+        } else {
+            // Reached depth limit; if children existed, mark truncated.
+            if walker.get_first_child(&current).is_ok() {
+                truncated = true;
+            }
+        }
+    }
+
+    Ok(CollectResult {
+        elements,
+        truncated,
+    })
+}
+
+/// Resolves a click target against candidate elements and executes the click action.
+///
+/// # Arguments
+/// * `label` - Spoken or typed target element label.
+/// * `elements` - Candidate live elements.
+/// * `cfg` - Match configuration thresholds.
+///
+/// # Returns
+/// An [`ActionOutcome`] indicating result of the resolution and click attempt.
+pub fn click_element_in(label: &str, elements: &[LiveElement], cfg: &MatchConfig) -> ActionOutcome {
+    let summaries: Vec<ElementSummary> = elements.iter().map(|e| e.summary.clone()).collect();
+    let matches = rank_matches(label, &summaries, None);
+    match resolve(&matches, cfg) {
+        Resolution::NotFound => ActionOutcome::NotFound,
+        Resolution::Ambiguous(indices) => {
+            let names = indices
+                .into_iter()
+                .filter_map(|i| elements.get(i).map(|e| e.summary.name.clone()))
+                .collect();
+            ActionOutcome::NeedsChoice(names)
+        }
+        Resolution::Unique(index) => match elements.get(index) {
+            Some(elem) => elem.click(),
+            None => ActionOutcome::NotFound,
+        },
+    }
+}
+
+/// Resolves a focus target against candidate elements and executes the focus action.
+///
+/// # Arguments
+/// * `label` - Spoken or typed target element label.
+/// * `elements` - Candidate live elements.
+/// * `cfg` - Match configuration thresholds.
+///
+/// # Returns
+/// An [`ActionOutcome`] indicating result of the resolution and focus attempt.
+pub fn focus_field_in(label: &str, elements: &[LiveElement], cfg: &MatchConfig) -> ActionOutcome {
+    let summaries: Vec<ElementSummary> = elements.iter().map(|e| e.summary.clone()).collect();
+    // Focus targets are typically fields (Edit, ComboBox), but buttons/links can also receive focus.
+    let matches = rank_matches(label, &summaries, None);
+    match resolve(&matches, cfg) {
+        Resolution::NotFound => ActionOutcome::NotFound,
+        Resolution::Ambiguous(indices) => {
+            let names = indices
+                .into_iter()
+                .filter_map(|i| elements.get(i).map(|e| e.summary.name.clone()))
+                .collect();
+            ActionOutcome::NeedsChoice(names)
+        }
+        Resolution::Unique(index) => match elements.get(index) {
+            Some(elem) => elem.focus(),
+            None => ActionOutcome::NotFound,
+        },
+    }
+}
+
+/// Types text, optionally resolving and focusing a named field first.
+///
+/// If `field` is provided, filters eligible controls to [`ControlKind::Edit`] and
+/// [`ControlKind::ComboBox`].
+///
+/// # Arguments
+/// * `text` - Text to type into the field.
+/// * `field` - Optional spoken name of the target field to focus first.
+/// * `elements` - Candidate live elements.
+/// * `cfg` - Match configuration thresholds.
+///
+/// # Returns
+/// An [`ActionOutcome`] indicating result of typing or field resolution.
+pub fn type_text_in(
+    text: &str,
+    field: Option<&str>,
+    elements: &[LiveElement],
+    cfg: &MatchConfig,
+) -> ActionOutcome {
+    if let Some(field_name) = field {
+        let summaries: Vec<ElementSummary> = elements.iter().map(|e| e.summary.clone()).collect();
+        // Filtering strictly to editable controls.
+        let allowed = [ControlKind::Edit, ControlKind::ComboBox];
+        let matches = rank_matches(field_name, &summaries, Some(&allowed));
+        match resolve(&matches, cfg) {
+            Resolution::NotFound => ActionOutcome::NotFound,
+            Resolution::Ambiguous(indices) => {
+                let names = indices
+                    .into_iter()
+                    .filter_map(|i| elements.get(i).map(|e| e.summary.name.clone()))
+                    .collect();
+                ActionOutcome::NeedsChoice(names)
+            }
+            Resolution::Unique(index) => match elements.get(index) {
+                Some(elem) => elem.type_text(text),
+                None => ActionOutcome::NotFound,
+            },
+        }
+    } else {
+        // No specific field targeted; request direct text typing into whatever is active.
+        ActionOutcome::NeedsTypeText {
+            text: text.to_owned(),
+        }
+    }
+}
+
+/// High-level function: clicks the element whose name best matches `label`.
+///
+/// Collects elements from the active foreground window, resolves `label`, and executes.
+///
+/// # Arguments
+/// * `label` - Spoken target label.
+///
+/// # Returns
+/// The outcome of the action.
+///
+/// # Errors
+/// Returns [`ScreenError`] if foreground window collection fails.
+pub fn click_element(label: &str) -> Result<ActionOutcome, ScreenError> {
+    let collected = collect_foreground(CollectLimits::default())?;
+    Ok(click_element_in(
+        label,
+        &collected.elements,
+        &MatchConfig::default(),
+    ))
+}
+
+/// High-level function: focuses the field whose name best matches `label`.
+///
+/// # Arguments
+/// * `label` - Spoken target label.
+///
+/// # Returns
+/// The outcome of the action.
+///
+/// # Errors
+/// Returns [`ScreenError`] if foreground window collection fails.
+pub fn focus_field(label: &str) -> Result<ActionOutcome, ScreenError> {
+    let collected = collect_foreground(CollectLimits::default())?;
+    Ok(focus_field_in(
+        label,
+        &collected.elements,
+        &MatchConfig::default(),
+    ))
+}
+
+/// High-level function: types `text`, focusing the field named `field` first if provided.
+///
+/// # Arguments
+/// * `text` - Text to type.
+/// * `field` - Optional spoken name of the field.
+///
+/// # Returns
+/// The outcome of the action.
+///
+/// # Errors
+/// Returns [`ScreenError`] if foreground window collection fails.
+pub fn type_text(text: &str, field: Option<&str>) -> Result<ActionOutcome, ScreenError> {
+    let collected = collect_foreground(CollectLimits::default())?;
+    Ok(type_text_in(
+        text,
+        field,
+        &collected.elements,
+        &MatchConfig::default(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::label::Rect;
+
+    /// Helper to create a dummy live element for testing.
+    fn make_live(name: &str, kind: ControlKind, x: i32, y: i32) -> LiveElement {
+        LiveElement::from_summary(ElementSummary {
+            name: name.to_owned(),
+            kind,
+            rect: Rect {
+                left: x,
+                top: y,
+                right: x + 100,
+                bottom: y + 40,
+            },
+            enabled: true,
+            offscreen: false,
+            is_password: false,
+        })
+    }
+
+    /// Tests default collection limits values.
+    #[test]
+    fn collect_limits_defaults() {
+        let limits = CollectLimits::default();
+        assert_eq!(limits.max_depth, 12);
+        assert_eq!(limits.max_elements, 150);
+        assert_eq!(limits.timeout, Duration::from_millis(1500));
+    }
+
+    /// Tests click_element_in resolves unique match to fallback coordinates when unhandled.
+    #[test]
+    fn click_element_unique_resolves_to_centre_coordinates() {
+        let elements = vec![
+            make_live("Submit", ControlKind::Button, 100, 200),
+            make_live("Cancel", ControlKind::Button, 300, 200),
+        ];
+        let outcome = click_element_in("submit", &elements, &MatchConfig::default());
+        assert_eq!(outcome, ActionOutcome::NeedsClickAt { x: 150, y: 220 });
+    }
+
+    /// Tests click_element_in returns NeedsChoice for ambiguous names.
+    #[test]
+    fn click_element_ambiguous_returns_needs_choice() {
+        let elements = vec![
+            make_live("Option A", ControlKind::Button, 10, 10),
+            make_live("Option B", ControlKind::Button, 10, 60),
+        ];
+        let outcome = click_element_in("Option", &elements, &MatchConfig::default());
+        match outcome {
+            ActionOutcome::NeedsChoice(names) => {
+                assert_eq!(names.len(), 2);
+                assert!(names.contains(&"Option A".to_string()));
+                assert!(names.contains(&"Option B".to_string()));
+            }
+            other => panic!("expected NeedsChoice, got {:?}", other),
+        }
+    }
+
+    /// Tests click_element_in returns NotFound when no match meets threshold.
+    #[test]
+    fn click_element_unmatched_returns_not_found() {
+        let elements = vec![make_live("Submit", ControlKind::Button, 100, 200)];
+        let outcome = click_element_in("xyz", &elements, &MatchConfig::default());
+        assert_eq!(outcome, ActionOutcome::NotFound);
+    }
+
+    /// Tests focus_field_in resolves unique field to centre click coordinates when SetFocus is stubbed.
+    #[test]
+    fn focus_field_unique_resolves_to_click() {
+        let elements = vec![make_live("Username", ControlKind::Edit, 50, 50)];
+        let outcome = focus_field_in("username", &elements, &MatchConfig::default());
+        assert_eq!(outcome, ActionOutcome::NeedsClickAt { x: 100, y: 70 });
+    }
+
+    /// Tests type_text_in without field returns direct NeedsTypeText.
+    #[test]
+    fn type_text_without_field_returns_needs_type_text() {
+        let elements = vec![make_live("Username", ControlKind::Edit, 50, 50)];
+        let outcome = type_text_in("hello world", None, &elements, &MatchConfig::default());
+        assert_eq!(
+            outcome,
+            ActionOutcome::NeedsTypeText {
+                text: "hello world".to_owned()
+            }
+        );
+    }
+
+    /// Tests type_text_in with named field focuses field and returns NeedsTypeText.
+    #[test]
+    fn type_text_with_field_resolves_field() {
+        let elements = vec![
+            make_live("Search", ControlKind::Edit, 200, 100),
+            make_live("Search", ControlKind::Button, 400, 100),
+        ];
+        // Searching for "Search" with edit filter only picks the Edit control.
+        let outcome = type_text_in(
+            "query text",
+            Some("Search"),
+            &elements,
+            &MatchConfig::default(),
+        );
+        assert_eq!(
+            outcome,
+            ActionOutcome::NeedsTypeText {
+                text: "query text".to_owned()
+            }
+        );
+    }
+
+    /// Tests mock foreground finder returning an error.
+    #[derive(Debug)]
+    struct FailingFinder;
+
+    impl ForegroundFinder for FailingFinder {
+        fn get_foreground_hwnd(&self) -> Result<isize, ScreenError> {
+            Err(ScreenError::NoForegroundWindow)
+        }
+    }
+
+    /// Tests collect_foreground_with propagates NoForegroundWindow.
+    #[test]
+    fn collect_foreground_handles_failing_finder() {
+        let finder = FailingFinder;
+        let res = collect_foreground_with(&finder, CollectLimits::default());
+        assert!(matches!(res, Err(ScreenError::NoForegroundWindow)));
+    }
+
+    /// Manual integration test to run against a real Windows desktop or demo form.
+    #[test]
+    #[ignore = "run manually on the demo form with: cargo test -p screen -- --ignored --nocapture"]
+    fn manual_windows_collect_foreground() {
+        let limits = CollectLimits::default();
+        let result = collect_foreground(limits);
+        match result {
+            Ok(collected) => {
+                println!(
+                    "Collected {} elements (truncated: {})",
+                    collected.elements.len(),
+                    collected.truncated
+                );
+                assert!(!collected.elements.is_empty());
+            }
+            Err(e) => {
+                println!("Collection failed: {e}");
+            }
+        }
+    }
+}
