@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 reach-core = { version = "0.1.0", path = "../core" }
 regex = "1.13.1"
-needle-infer = "0.3.1"
+needle-infer = "=0.3.1"
 serde_json = "1.0.154"
 strsim = "0.11.1"
 
