@@ -15,6 +15,8 @@ use enigo::{
     Settings,
 };
 use reach_core::{Direction, Executor, Intent, Key, ZoomDir};
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Default number of scroll increments when unspecified.
@@ -169,6 +171,205 @@ pub fn type_str(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Allowed applications for direct launching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllowedApp {
+    /// Google Chrome web browser.
+    Chrome,
+    /// Windows Notepad text editor.
+    Notepad,
+    /// Windows File Explorer.
+    Explorer,
+}
+
+/// Validates that an application name belongs to the safe allow-list.
+///
+/// Only "chrome", "notepad", and "explorer" are allowed (case-insensitive,
+/// trimming whitespace and ignoring an optional `.exe` suffix).
+///
+/// # Arguments
+/// * `name` - The spoken or typed application name.
+///
+/// # Returns
+/// An [`AllowedApp`] variant identifying the approved executable.
+///
+/// # Errors
+/// Returns an error message if the name is empty or not in the allow-list.
+pub fn validate_app_name(name: &str) -> Result<AllowedApp, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("application name cannot be empty".to_owned());
+    }
+    let lower = trimmed.to_lowercase();
+    let stripped = lower.strip_suffix(".exe").unwrap_or(&lower);
+    match stripped {
+        "chrome" => Ok(AllowedApp::Chrome),
+        "notepad" => Ok(AllowedApp::Notepad),
+        "explorer" => Ok(AllowedApp::Explorer),
+        other => Err(format!(
+            "unknown or disallowed application: '{other}'. Only 'chrome', 'notepad', and 'explorer' are allowed"
+        )),
+    }
+}
+
+/// Validates that a URL string uses an approved `http` or `https` scheme.
+///
+/// Rejects non-web schemes (such as `ftp://`, `file://`, `javascript:`, or `data:`)
+/// and malformed or control-character-containing URLs.
+///
+/// # Arguments
+/// * `url` - The web URL string to validate.
+///
+/// # Returns
+/// A validated string slice referencing the trimmed URL.
+///
+/// # Errors
+/// Returns an error message if the URL does not start with `http://` or `https://`,
+/// is empty, or contains control characters.
+pub fn validate_url(url: &str) -> Result<&str, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("URL cannot be empty".to_owned());
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err("URL contains invalid control characters".to_owned());
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Ok(trimmed)
+    } else {
+        Err(format!(
+            "invalid URL scheme: only http:// and https:// are allowed, got: '{trimmed}'"
+        ))
+    }
+}
+
+/// Returns standard file paths where Google Chrome is installed on Windows.
+///
+/// Checks environment variables `ProgramFiles`, `ProgramFiles(x86)`, and `LOCALAPPDATA`,
+/// alongside standard drive C installation paths.
+///
+/// # Returns
+/// A list of candidate [`PathBuf`] locations for `chrome.exe`.
+pub fn standard_chrome_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        candidates.push(PathBuf::from(pf).join(r"Google\Chrome\Application\chrome.exe"));
+    }
+    if let Ok(pfx86) = std::env::var("ProgramFiles(x86)") {
+        candidates.push(PathBuf::from(pfx86).join(r"Google\Chrome\Application\chrome.exe"));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join(r"Google\Chrome\Application\chrome.exe"));
+    }
+
+    candidates.push(PathBuf::from(
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    ));
+    candidates.push(PathBuf::from(
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ));
+
+    candidates
+}
+
+/// Locates the `chrome.exe` binary in standard installation directories.
+///
+/// # Returns
+/// `Some(PathBuf)` if `chrome.exe` is found on disk, or `None`.
+pub fn find_chrome_path() -> Option<PathBuf> {
+    standard_chrome_paths()
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+/// Opens a web URL in Google Chrome with `--force-renderer-accessibility` enabled.
+///
+/// First validates that the URL uses an `http` or `https` scheme. If Chrome is found
+/// in standard installation locations, it is launched with `--force-renderer-accessibility`
+/// followed by the URL so Chrome exposes its accessibility tree to Reach.
+/// If Chrome is not found on disk, falls back to the system default browser via the `open` crate.
+///
+/// # Arguments
+/// * `url` - The web address to open.
+///
+/// # Returns
+/// A descriptive message confirming the browser launch.
+///
+/// # Errors
+/// Returns an error if:
+/// * The URL scheme is not `http` or `https`.
+/// * Spawning the browser process fails.
+pub fn open_url(url: &str) -> Result<String, String> {
+    let normalized = if url.starts_with("http://") || url.starts_with("https://") {
+        url.trim().to_owned()
+    } else if !url.contains("://") && (url.contains('.') || url.starts_with("localhost")) {
+        format!("https://{}", url.trim())
+    } else {
+        url.trim().to_owned()
+    };
+
+    let valid = validate_url(&normalized)?;
+
+    if let Some(chrome_path) = find_chrome_path() {
+        Command::new(chrome_path)
+            .arg("--force-renderer-accessibility")
+            .arg(valid)
+            .spawn()
+            .map_err(|e| format!("failed to launch Chrome with URL: {e}"))?;
+        Ok(format!("opened URL in Chrome: {valid}"))
+    } else {
+        open::that_detached(valid)
+            .map_err(|e| format!("failed to open URL in default browser: {e}"))?;
+        Ok(format!("opened URL in default browser: {valid}"))
+    }
+}
+
+/// Launches an application from the allow-list using explicit argument lists.
+///
+/// Never passes user speech or shell strings to `cmd` or `powershell`.
+/// Mapped to fixed executables:
+/// - "chrome": locates `chrome.exe` in standard paths and launches with `--force-renderer-accessibility`.
+/// - "notepad": launches `notepad.exe`.
+/// - "explorer": launches `explorer.exe`.
+///
+/// # Arguments
+/// * `name` - The application name to launch ("chrome", "notepad", or "explorer").
+///
+/// # Returns
+/// A descriptive message confirming application launch.
+///
+/// # Errors
+/// Returns an error if the name is not in the allow-list or process spawning fails.
+pub fn open_app(name: &str) -> Result<String, String> {
+    let app = validate_app_name(name)?;
+    match app {
+        AllowedApp::Chrome => {
+            let mut cmd = if let Some(chrome_path) = find_chrome_path() {
+                Command::new(chrome_path)
+            } else {
+                Command::new("chrome.exe")
+            };
+            cmd.arg("--force-renderer-accessibility")
+                .spawn()
+                .map_err(|e| format!("failed to launch Chrome: {e}"))?;
+            Ok("opened app: chrome".to_owned())
+        }
+        AllowedApp::Notepad => {
+            Command::new("notepad.exe")
+                .spawn()
+                .map_err(|e| format!("failed to launch Notepad: {e}"))?;
+            Ok("opened app: notepad".to_owned())
+        }
+        AllowedApp::Explorer => {
+            Command::new("explorer.exe")
+                .spawn()
+                .map_err(|e| format!("failed to launch Explorer: {e}"))?;
+            Ok("opened app: explorer".to_owned())
+        }
+    }
+}
+
 /// Executor for global computer actions: key presses, scrolling, zooming, and opening apps/URLs.
 pub struct GlobalExecutor {
     /// Underlying platform input injector.
@@ -246,19 +447,8 @@ impl Executor for GlobalExecutor {
                     Ok("reset zoom".to_owned())
                 }
             },
-            Intent::OpenApp { name } => {
-                // Never pass user text to cmd/powershell. Launch safely via open crate.
-                open::that_detached(name)
-                    .map_err(|e| format!("failed to launch application: {e}"))?;
-                Ok(format!("opened app: {}", name))
-            }
-            Intent::OpenUrl { url } => {
-                if !url.starts_with("http://") && !url.starts_with("https://") {
-                    return Err("invalid URL protocol: only http and https are allowed".to_owned());
-                }
-                open::that_detached(url).map_err(|e| format!("failed to open web URL: {e}"))?;
-                Ok(format!("opened URL: {}", url))
-            }
+            Intent::OpenApp { name } => open_app(name),
+            Intent::OpenUrl { url } => open_url(url),
             unhandled => Err(format!(
                 "intent not handled by GlobalExecutor: {:?}",
                 unhandled
@@ -326,5 +516,79 @@ mod tests {
         install_panic_key_release_hook();
         install_panic_key_release_hook();
         assert!(PANIC_HOOK_INSTALLED.load(Ordering::SeqCst));
+    }
+
+    /// Tests allow-list application name validation accepts allowed apps.
+    #[test]
+    fn validate_app_name_accepts_allowed_apps() {
+        assert_eq!(validate_app_name("chrome"), Ok(AllowedApp::Chrome));
+        assert_eq!(validate_app_name("Chrome"), Ok(AllowedApp::Chrome));
+        assert_eq!(validate_app_name("chrome.exe"), Ok(AllowedApp::Chrome));
+        assert_eq!(validate_app_name(" notepad "), Ok(AllowedApp::Notepad));
+        assert_eq!(validate_app_name("NOTEPAD.EXE"), Ok(AllowedApp::Notepad));
+        assert_eq!(validate_app_name("explorer"), Ok(AllowedApp::Explorer));
+        assert_eq!(validate_app_name("explorer.exe"), Ok(AllowedApp::Explorer));
+    }
+
+    /// Tests allow-list application name validation rejects unapproved apps.
+    #[test]
+    fn validate_app_name_rejects_unapproved_apps() {
+        assert!(validate_app_name("cmd").is_err());
+        assert!(validate_app_name("powershell").is_err());
+        assert!(validate_app_name("calc").is_err());
+        assert!(validate_app_name("firefox").is_err());
+        assert!(validate_app_name("").is_err());
+        assert!(validate_app_name("   ").is_err());
+        assert!(validate_app_name("malicious_app").is_err());
+    }
+
+    /// Tests URL validation accepts valid http and https URLs.
+    #[test]
+    fn validate_url_accepts_http_and_https() {
+        assert!(validate_url("http://example.com").is_ok());
+        assert!(validate_url("https://example.com").is_ok());
+        assert!(validate_url("https://example.com/register?foo=bar#section").is_ok());
+        assert!(validate_url("http://localhost:8080/demo/form.html").is_ok());
+    }
+
+    /// Tests URL validation rejects non-http/https protocols.
+    #[test]
+    fn validate_url_rejects_disallowed_schemes() {
+        assert!(validate_url("ftp://example.com").is_err());
+        assert!(validate_url("file:///C:/Windows").is_err());
+        assert!(validate_url("javascript:alert(1)").is_err());
+        assert!(validate_url("mailto:test@example.com").is_err());
+        assert!(validate_url("data:text/html,<h1>test</h1>").is_err());
+        assert!(validate_url("").is_err());
+        assert!(validate_url("   ").is_err());
+        assert!(validate_url("not a url").is_err());
+    }
+
+    /// Tests that standard Chrome paths includes typical Windows locations.
+    #[test]
+    fn standard_chrome_paths_has_candidates() {
+        let paths = standard_chrome_paths();
+        assert!(!paths.is_empty());
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains("chrome.exe"))
+        );
+    }
+
+    /// Manual test launching Notepad.
+    #[test]
+    #[ignore = "manual launch test for notepad; run with: cargo test -p exec -- --ignored --nocapture"]
+    fn manual_launch_notepad() {
+        let res = open_app("notepad");
+        assert!(res.is_ok(), "failed to launch notepad: {:?}", res);
+    }
+
+    /// Manual test launching Chrome with accessibility and URL.
+    #[test]
+    #[ignore = "manual launch test for Chrome; run with: cargo test -p exec -- --ignored --nocapture"]
+    fn manual_launch_chrome_url() {
+        let res = open_url("https://example.com");
+        assert!(res.is_ok(), "failed to launch url: {:?}", res);
     }
 }

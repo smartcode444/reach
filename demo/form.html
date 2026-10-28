@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Student Registration - Reach Voice Control Demo</title>
+  <style>
+    :root {
+      --bg-color: #f1f5f9;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #334155;
+      --border-color: #94a3b8;
+      --primary: #1d4ed8;
+      --primary-hover: #1e40af;
+      --focus-ring: #2563eb;
+      --success-bg: #dcfce7;
+      --success-text: #14532d;
+      --success-border: #86efac;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 18px;
+      line-height: 1.5;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      padding: 40px 20px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+    }
+
+    .container {
+      background: var(--card-bg);
+      border: 2px solid var(--border-color);
+      border-radius: 12px;
+      padding: 36px 40px;
+      width: 100%;
+      max-width: 680px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+    }
+
+    header {
+      margin-bottom: 28px;
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 8px;
+    }
+
+    p.subtitle {
+      font-size: 16px;
+      color: var(--text-muted);
+    }
+
+    .form-group {
+      margin-bottom: 22px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    label {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-main);
+      margin-bottom: 8px;
+      display: inline-block;
+    }
+
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"],
+    select {
+      font-size: 18px;
+      padding: 12px 14px;
+      border: 2px solid var(--border-color);
+      border-radius: 8px;
+      color: var(--text-main);
+      background-color: #ffffff;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      width: 100%;
+    }
+
+    input:focus,
+    select:focus {
+      outline: 3px solid var(--focus-ring);
+      outline-offset: 2px;
+      border-color: var(--primary);
+    }
+
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 10px;
+      margin-bottom: 26px;
+    }
+
+    input[type="checkbox"] {
+      width: 24px;
+      height: 24px;
+      cursor: pointer;
+      accent-color: var(--primary);
+    }
+
+    input[type="checkbox"]:focus {
+      outline: 3px solid var(--focus-ring);
+      outline-offset: 2px;
+    }
+
+    .checkbox-group label {
+      margin-bottom: 0;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    button[type="submit"] {
+      display: block;
+      width: 100%;
+      font-size: 20px;
+      font-weight: 700;
+      padding: 14px 24px;
+      color: #ffffff;
+      background-color: var(--primary);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background-color 0.15s ease;
+    }
+
+    button[type="submit"]:hover {
+      background-color: var(--primary-hover);
+    }
+
+    button[type="submit"]:focus {
+      outline: 4px solid var(--focus-ring);
+      outline-offset: 2px;
+    }
+
+    .status-message {
+      display: none;
+      margin-top: 24px;
+      padding: 16px 20px;
+      background-color: var(--success-bg);
+      border: 2px solid var(--success-border);
+      border-radius: 8px;
+      color: var(--success-text);
+      font-size: 19px;
+      font-weight: 600;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>Student Registration</h1>
+      <p class="subtitle">Complete the form below to register your student profile.</p>
+    </header>
+
+    <form id="registration-form" novalidate>
+      <div class="form-group">
+        <label for="full-name">Full Name</label>
+        <input type="text" id="full-name" name="full_name" placeholder="e.g. Jinwoo Sung" autocomplete="name" required>
+      </div>
+
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" placeholder="e.g. student@university.edu" autocomplete="email" required>
+      </div>
+
+      <div class="form-group">
+        <label for="matric-number">Matric Number</label>
+        <input type="text" id="matric-number" name="matric_number" placeholder="e.g. RUN/CMP/21/10425" required>
+      </div>
+
+      <div class="form-group">
+        <label for="phone">Phone</label>
+        <input type="tel" id="phone" name="phone" placeholder="e.g. +234 801 234 5678" autocomplete="tel" required>
+      </div>
+
+      <div class="form-group">
+        <label for="department">Department</label>
+        <input type="text" id="department" name="department" placeholder="e.g. Computer Science" required>
+      </div>
+
+      <div class="form-group">
+        <label for="level">Level</label>
+        <select id="level" name="level" required>
+          <option value="" disabled selected>Select level</option>
+          <option value="100">100 Level</option>
+          <option value="200">200 Level</option>
+          <option value="300">300 Level</option>
+          <option value="400">400 Level</option>
+          <option value="500">500 Level</option>
+        </select>
+      </div>
+
+      <div class="checkbox-group">
+        <input type="checkbox" id="agree" name="agree" required>
+        <label for="agree">I agree</label>
+      </div>
+
+      <button type="submit" id="submit" name="submit">Submit</button>
+
+      <div id="status-message" class="status-message" role="status" aria-live="polite">
+        Submitted
+      </div>
+    </form>
+  </main>
+
+  <script>
+    document.getElementById('registration-form').addEventListener('submit', function(event) {
+      event.preventDefault();
+      var status = document.getElementById('status-message');
+      status.style.display = 'block';
+      status.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  </script>
+</body>
+</html>
