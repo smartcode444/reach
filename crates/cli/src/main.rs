@@ -1,107 +1,242 @@
 //! Command-line test harness for Reach.
+//!
+//! `cli pipeline` runs typed text through the same wake, routing and execution
+//! path the microphone will use. The older direct-utterance mode remains for
+//! quick rule-grammar checks.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod executor;
 pub mod pipeline;
 
+use std::io;
 use std::time::Instant;
 
 pub use executor::CompositeExecutor;
-use pipeline::{DisabledModel, Pipeline, PipelineArgs, PipelineModel};
-use reach_core::Executor;
+use nlu::{IntentModel, NeedleConfig, NeedleIntentModel};
+use pipeline::{CliModel, Pipeline, PipelineIo};
+use reach_core::{Executor, Intent};
 
-/// Dispatches command-line arguments to the pipeline or single-intent execution.
+/// The model file loaded when `--model` is passed.
+const DEFAULT_MODEL_PATH: &str = "models/needle3.cact";
+
+/// Entry point of the test harness.
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(error) = run(&args) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+/// Runs the requested CLI mode.
 ///
 /// # Arguments
-/// * `args` - Command-line arguments excluding binary name.
+/// * `args` - The process arguments after the binary name.
 ///
 /// # Returns
-/// `Ok(())` on success.
+/// `Ok(())` when the mode finished successfully.
 ///
 /// # Errors
-/// Returns an error message if model loading, execution, or pipeline I/O fails.
-fn run_cli(args: &[String]) -> Result<(), String> {
+/// Returns a message for an unknown pipeline option, a model or executor load
+/// failure, or an I/O failure.
+fn run(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) == Some("pipeline") {
+        return run_pipeline(&args[1..]);
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--model" || arg == "--dry-run" || arg.starts_with("--model="))
+    {
+        return run_pipeline(args);
+    }
+    run_legacy(args)
+}
+
+/// Runs the original direct-utterance mode.
+///
+/// Supports rule-grammar utterances, `--say` commands, and JSON intents.
+///
+/// # Arguments
+/// * `args` - Words to parse as one rule-grammar utterance or JSON intent.
+///
+/// # Returns
+/// `Ok(())` after the intent runs or the help line is printed.
+///
+/// # Errors
+/// Returns an executor initialization error, an execution error, or a parse
+/// error that never includes the transcript.
+fn run_legacy(args: &[String]) -> Result<(), String> {
     if args.is_empty() {
         println!("reach cli");
         return Ok(());
     }
 
-    if let Some(first) = args.first() {
-        if first == "pipeline" {
-            let parsed = PipelineArgs::parse(&args[1..]);
-            let model = if parsed.model_enabled {
-                let needle = nlu::NeedleIntentModel::load(
-                    "models/needle3.cact",
-                    nlu::NeedleConfig::default(),
-                )
-                .map_err(|e| format!("failed to load needle model: {e}"))?;
-                PipelineModel::Needle(Box::new(needle))
-            } else {
-                PipelineModel::Disabled(DisabledModel)
-            };
-
-            let exec = CompositeExecutor::new()?;
-            let mut pipe = Pipeline::new(model, exec, parsed.dry_run);
-
-            let stdin = std::io::stdin();
-            let mut reader = stdin.lock();
-            let stdout = std::io::stdout();
-            let mut writer = stdout.lock();
-
-            if let Some(ref utterance) = parsed.utterance {
-                pipe.process_utterance(utterance, Instant::now(), &mut reader, &mut writer)?;
-            } else {
-                pipe.run_interactive(&mut reader, &mut writer)?;
-            }
-            return Ok(());
-        }
-
-        if first == "--say" {
-            let utterance = args[1..].join(" ");
-            let mut exec = CompositeExecutor::new()?;
-            if let Some(intent) = nlu::parse_rule(&utterance) {
-                match exec.run(&intent) {
-                    Ok(msg) => println!("{msg}"),
-                    Err(err) => eprintln!("execution failed: {err}"),
-                }
-            } else {
-                eprintln!("could not parse utterance into intent: {utterance}");
-            }
-            return Ok(());
-        }
-    }
-
-    let input = args.join(" ");
-    let mut exec = CompositeExecutor::new()?;
-
-    // Try deserializing as a JSON intent first:
-    if let Ok(intent) = serde_json::from_str::<reach_core::Intent>(&input) {
-        match exec.run(&intent) {
-            Ok(msg) => println!("{msg}"),
-            Err(err) => eprintln!("execution failed: {err}"),
-        }
+    if args.first().map(String::as_str) == Some("--say") {
+        let utterance = args[1..].join(" ");
+        let mut executor = CompositeExecutor::new()?;
+        let intent = nlu::parse_rule(&utterance)
+            .ok_or_else(|| "could not parse utterance into intent".to_owned())?;
+        let message = executor.run(&intent)?;
+        println!("{message}");
         return Ok(());
     }
 
-    // Fall back to rule grammar:
-    if let Some(intent) = nlu::parse_rule(&input) {
-        match exec.run(&intent) {
-            Ok(msg) => println!("{msg}"),
-            Err(err) => eprintln!("execution failed: {err}"),
-        }
-    } else {
-        eprintln!("could not parse utterance into intent: {input}");
+    let input = args.join(" ");
+    let mut executor = CompositeExecutor::new()?;
+
+    // Try deserializing as a raw JSON intent first:
+    if let Ok(intent) = serde_json::from_str::<reach_core::Intent>(&input) {
+        let message = executor.run(&intent)?;
+        println!("{message}");
+        return Ok(());
     }
 
+    let intent = nlu::parse_rule(&input)
+        .ok_or_else(|| "could not parse utterance into intent".to_owned())?;
+    let message = executor.run(&intent)?;
+    println!("{message}");
     Ok(())
 }
 
-/// Entry point of the test harness.
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(err) = run_cli(&args) {
-        eprintln!("{err}");
-        std::process::exit(1);
+/// Runs the typed-text pipeline once or interactively.
+///
+/// # Arguments
+/// * `args` - Everything after the `pipeline` subcommand.
+///
+/// # Returns
+/// `Ok(())` after the single transcript or every interactive line has been
+/// processed.
+///
+/// # Errors
+/// Returns a message for an unknown option, a model load failure, an executor
+/// initialization failure, or an I/O failure.
+fn run_pipeline(args: &[String]) -> Result<(), String> {
+    let parsed = pipeline::parse_pipeline_args(args)?;
+
+    // The model is loaded once, before the first line, so interactive runs do
+    // not pay the load cost again.
+    let model = if parsed.model {
+        let path = parsed.model_path.as_deref().unwrap_or(DEFAULT_MODEL_PATH);
+        let model = NeedleIntentModel::load(path, NeedleConfig::default())
+            .map_err(|error| format!("failed to load Needle model: {error}"))?;
+        CliModel::Needle(Box::new(model))
+    } else {
+        CliModel::Offline
+    };
+
+    let executor = if parsed.dry_run {
+        CliExecutor::DryRun
+    } else {
+        CliExecutor::Real(CompositeExecutor::new()?)
+    };
+
+    let mut pipeline = Pipeline::new(model, executor, parsed.dry_run);
+
+    match parsed.utterance {
+        Some(utterance) => run_once(&mut pipeline, &utterance),
+        None => run_interactive(&mut pipeline),
     }
+}
+
+/// The executor chosen for one CLI run.
+enum CliExecutor {
+    /// The real desktop executor.
+    Real(CompositeExecutor),
+    /// A placeholder used by dry runs; it refuses to execute.
+    DryRun,
+}
+
+impl Executor for CliExecutor {
+    /// Runs the real executor, or refuses in dry-run mode.
+    ///
+    /// # Arguments
+    /// * `intent` - The intent to run.
+    ///
+    /// # Returns
+    /// The real executor's message.
+    ///
+    /// # Errors
+    /// Returns the real executor's error, or a refusal in dry-run mode. A dry
+    /// run never reaches this method because the pipeline prints the route
+    /// instead.
+    fn run(&mut self, intent: &Intent) -> Result<String, String> {
+        match self {
+            Self::Real(executor) => executor.run(intent),
+            Self::DryRun => Err("dry run must not execute".to_owned()),
+        }
+    }
+}
+
+/// Runs one transcript and writes its result to stdout.
+///
+/// # Arguments
+/// * `pipeline` - The configured pipeline.
+/// * `utterance` - The typed transcript, including the wake word.
+///
+/// # Returns
+/// `Ok(())` after the result is written.
+///
+/// # Errors
+/// Returns an I/O error from the pipeline streams.
+fn run_once<M: IntentModel, E: Executor>(
+    pipeline: &mut Pipeline<M, E>,
+    utterance: &str,
+) -> Result<(), String> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    let mut io = PipelineIo::new(&mut input, &mut output);
+    pipeline
+        .process(utterance, Instant::now(), &mut io)
+        .map_err(|error| format!("pipeline I/O failed: {error}"))
+}
+
+/// Reads typed transcripts from stdin until end of input.
+///
+/// # Arguments
+/// * `pipeline` - The configured pipeline, reused so the wake window and model
+///   survive between lines.
+///
+/// # Returns
+/// `Ok(())` at end of input.
+///
+/// # Errors
+/// Returns an I/O error from the prompt, the stdin read or a pipeline result.
+fn run_interactive<M: IntentModel, E: Executor>(
+    pipeline: &mut Pipeline<M, E>,
+) -> Result<(), String> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    let mut io = PipelineIo::new(&mut input, &mut output);
+
+    loop {
+        write!(io.output, "reach> ").map_err(|error| format!("pipeline I/O failed: {error}"))?;
+        io.output
+            .flush()
+            .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+
+        let mut line = String::new();
+        let read = io
+            .input
+            .read_line(&mut line)
+            .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+        if read == 0 {
+            break;
+        }
+
+        let transcript = line.trim();
+        if transcript.is_empty() {
+            continue;
+        }
+
+        pipeline
+            .process(transcript, Instant::now(), &mut io)
+            .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+    }
+
+    Ok(())
 }

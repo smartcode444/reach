@@ -15,6 +15,9 @@ use uiautomation::patterns::{UIInvokePattern, UIValuePattern};
 #[cfg(windows)]
 use uiautomation::types::{ControlType, Handle};
 
+/// Control kinds that can accept typed text when a field name is supplied.
+const FIELD_CONTROL_KINDS: [ControlKind; 2] = [ControlKind::Edit, ControlKind::ComboBox];
+
 /// Limits for walking the on-screen UI tree to avoid excessive latency or memory use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CollectLimits {
@@ -377,6 +380,9 @@ pub fn click_element_in(label: &str, elements: &[LiveElement], cfg: &MatchConfig
 
 /// Resolves a focus target against candidate elements and executes the focus action.
 ///
+/// Only [`ControlKind::Edit`] and [`ControlKind::ComboBox`] are considered, so
+/// a button, link or menu item with the same name can never receive focus.
+///
 /// # Arguments
 /// * `label` - Spoken or typed target element label.
 /// * `elements` - Candidate live elements.
@@ -386,8 +392,8 @@ pub fn click_element_in(label: &str, elements: &[LiveElement], cfg: &MatchConfig
 /// An [`ActionOutcome`] indicating result of the resolution and focus attempt.
 pub fn focus_field_in(label: &str, elements: &[LiveElement], cfg: &MatchConfig) -> ActionOutcome {
     let summaries: Vec<ElementSummary> = elements.iter().map(|e| e.summary.clone()).collect();
-    // Focus targets are typically fields (Edit, ComboBox), but buttons/links can also receive focus.
-    let matches = rank_matches(label, &summaries, None);
+    // Field targets must be editable; a same-named button or link must not win.
+    let matches = rank_matches(label, &summaries, Some(&FIELD_CONTROL_KINDS));
     match resolve(&matches, cfg) {
         Resolution::NotFound => ActionOutcome::NotFound,
         Resolution::Ambiguous(indices) => {
@@ -426,8 +432,7 @@ pub fn type_text_in(
     if let Some(field_name) = field {
         let summaries: Vec<ElementSummary> = elements.iter().map(|e| e.summary.clone()).collect();
         // Filtering strictly to editable controls.
-        let allowed = [ControlKind::Edit, ControlKind::ComboBox];
-        let matches = rank_matches(field_name, &summaries, Some(&allowed));
+        let matches = rank_matches(field_name, &summaries, Some(&FIELD_CONTROL_KINDS));
         match resolve(&matches, cfg) {
             Resolution::NotFound => ActionOutcome::NotFound,
             Resolution::Ambiguous(indices) => {
@@ -619,6 +624,113 @@ mod tests {
             ActionOutcome::NeedsTypeText {
                 text: "query text".to_owned()
             }
+        );
+    }
+
+    /// focus_field_in must ignore buttons, links and menu items even when their
+    /// names match the spoken field name.
+    #[test]
+    fn focus_field_ignores_non_editable_controls() {
+        let elements = vec![
+            make_live("Email", ControlKind::Button, 10, 10),
+            make_live("Email", ControlKind::Link, 20, 20),
+            make_live("Email", ControlKind::MenuItem, 30, 30),
+            make_live("Email", ControlKind::Edit, 50, 50),
+        ];
+        let outcome = focus_field_in("email", &elements, &MatchConfig::default());
+        assert_eq!(outcome, ActionOutcome::NeedsClickAt { x: 100, y: 70 });
+    }
+
+    /// focus_field_in must report NotFound when only non-editable controls match.
+    #[test]
+    fn focus_field_without_editable_control_returns_not_found() {
+        let elements = vec![
+            make_live("Email", ControlKind::Button, 10, 10),
+            make_live("Email", ControlKind::Link, 20, 20),
+            make_live("Email", ControlKind::MenuItem, 30, 30),
+        ];
+        let outcome = focus_field_in("email", &elements, &MatchConfig::default());
+        assert_eq!(outcome, ActionOutcome::NotFound);
+    }
+
+    /// type_text_in with a field name must ignore buttons, links and menu items.
+    #[test]
+    fn type_text_with_field_ignores_non_editable_controls() {
+        let elements = vec![
+            make_live("Email", ControlKind::Button, 10, 10),
+            make_live("Email", ControlKind::Link, 20, 20),
+            make_live("Email", ControlKind::MenuItem, 30, 30),
+            make_live("Email", ControlKind::Edit, 50, 50),
+        ];
+        let outcome = type_text_in(
+            "student@example.com",
+            Some("email"),
+            &elements,
+            &MatchConfig::default(),
+        );
+        assert_eq!(
+            outcome,
+            ActionOutcome::NeedsTypeText {
+                text: "student@example.com".to_owned()
+            }
+        );
+    }
+
+    /// type_text_in with a field name must report NotFound when only
+    /// non-editable controls match.
+    #[test]
+    fn type_text_with_field_without_editable_control_returns_not_found() {
+        let elements = vec![
+            make_live("Email", ControlKind::Button, 10, 10),
+            make_live("Email", ControlKind::Link, 20, 20),
+            make_live("Email", ControlKind::MenuItem, 30, 30),
+        ];
+        let outcome = type_text_in("text", Some("email"), &elements, &MatchConfig::default());
+        assert_eq!(outcome, ActionOutcome::NotFound);
+    }
+
+    /// Combo boxes are valid field targets alongside Edit controls.
+    #[test]
+    fn combo_box_is_a_valid_field_target() {
+        let elements = vec![
+            make_live("Level", ControlKind::Button, 10, 10),
+            make_live("Level", ControlKind::ComboBox, 50, 50),
+        ];
+        assert_eq!(
+            focus_field_in("level", &elements, &MatchConfig::default()),
+            ActionOutcome::NeedsClickAt { x: 100, y: 70 }
+        );
+        assert_eq!(
+            type_text_in("200", Some("level"), &elements, &MatchConfig::default()),
+            ActionOutcome::NeedsTypeText {
+                text: "200".to_owned()
+            }
+        );
+    }
+
+    /// The demo form's field labels resolve to their Edit controls, and the
+    /// Chrome Home button and Managed bookmarks folder are not candidates.
+    #[test]
+    fn focus_field_resolves_demo_form_fields() {
+        let elements = vec![
+            make_live("Home", ControlKind::Button, 0, 0),
+            make_live("Managed bookmarks", ControlKind::MenuItem, 0, 40),
+            make_live("Full Name", ControlKind::Edit, 100, 100),
+            make_live("Email", ControlKind::Edit, 100, 200),
+            make_live("Matric Number", ControlKind::Edit, 100, 300),
+            make_live("Submit", ControlKind::Button, 100, 400),
+        ];
+        assert_eq!(
+            focus_field_in("full name", &elements, &MatchConfig::default()),
+            ActionOutcome::NeedsClickAt { x: 150, y: 120 }
+        );
+        assert_eq!(
+            focus_field_in("email", &elements, &MatchConfig::default()),
+            ActionOutcome::NeedsClickAt { x: 150, y: 220 }
+        );
+        assert_eq!(
+            focus_field_in("matric number", &elements, &MatchConfig::default()),
+            ActionOutcome::NeedsClickAt { x: 150, y: 320 }
         );
     }
 
