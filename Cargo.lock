@@ -929,6 +929,7 @@ dependencies = [
  "enigo",
  "open",
  "reach-core",
+ "windows 0.62.2",
 ]
 
 [[package]]
