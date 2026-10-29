@@ -8,6 +8,8 @@ reach-core = { version = "0.1.0", path = "../core" }
 image = "0.25.10"
 uiautomation = "0.25.1"
 xcap = "0.9.8"
+strsim = "0.11.1"
+windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
 
 [lints]
 workspace = true
