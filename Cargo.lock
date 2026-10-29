@@ -537,6 +537,7 @@ dependencies = [
  "nlu",
  "reach-core",
  "screen",
+ "serde_json",
 ]
 
 [[package]]

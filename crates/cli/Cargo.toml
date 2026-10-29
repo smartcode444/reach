@@ -8,6 +8,7 @@ exec = { version = "0.1.0", path = "../exec" }
 reach-core = { version = "0.1.0", path = "../core" }
 nlu = { version = "0.1.0", path = "../nlu" }
 screen = { version = "0.1.0", path = "../screen" }
+serde_json = "1.0.154"
 
 [lints]
 workspace = true
