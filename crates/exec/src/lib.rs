@@ -19,6 +19,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub mod emergency_stop;
+pub use emergency_stop::{EmergencyStop, EmergencyStopError};
+use std::sync::Arc;
+
 /// Default number of scroll increments when unspecified.
 pub const DEFAULT_SCROLL_STEPS: i32 = 3;
 
@@ -474,6 +478,8 @@ fn send_zoom<S: KeySink>(sink: &mut S, direction: ZoomDir) -> Result<(), String>
 pub struct GlobalExecutor {
     /// Underlying platform input injector.
     enigo: Enigo,
+    /// Optional shared stop flag checked before executing actions.
+    stop_flag: Option<Arc<AtomicBool>>,
 }
 
 impl GlobalExecutor {
@@ -488,7 +494,40 @@ impl GlobalExecutor {
         install_panic_key_release_hook();
         let enigo = Enigo::new(&Settings::default())
             .map_err(|e| format!("failed to initialize enigo: {e}"))?;
-        Ok(Self { enigo })
+        Ok(Self {
+            enigo,
+            stop_flag: None,
+        })
+    }
+
+    /// Attaches an emergency stop flag to this executor.
+    ///
+    /// # Arguments
+    /// * `flag` - The shared atomic stop flag to monitor.
+    pub fn set_stop_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.stop_flag = Some(flag);
+    }
+
+    /// Builder method to attach an emergency stop flag.
+    ///
+    /// # Arguments
+    /// * `flag` - The shared atomic stop flag to monitor.
+    ///
+    /// # Returns
+    /// Self configured with the provided stop flag.
+    pub fn with_stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.stop_flag = Some(flag);
+        self
+    }
+
+    /// Returns whether the emergency stop is currently active.
+    ///
+    /// # Returns
+    /// `true` if the emergency stop flag is set to true, `false` otherwise.
+    pub fn is_stopped(&self) -> bool {
+        self.stop_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst))
     }
 }
 
@@ -503,6 +542,10 @@ impl Default for GlobalExecutor {
 
 impl Executor for GlobalExecutor {
     fn run(&mut self, intent: &Intent) -> Result<String, String> {
+        if self.is_stopped() {
+            release_all_keys();
+            return Err("emergency stop is active: execution aborted".to_owned());
+        }
         match intent {
             Intent::PressKey { key } => {
                 let enigo_key = map_key(*key);
@@ -752,5 +795,16 @@ mod tests {
     fn manual_launch_chrome_url() {
         let res = open_url("https://example.com");
         assert!(res.is_ok(), "failed to launch url: {:?}", res);
+    }
+
+    /// Verifies that GlobalExecutor immediately aborts when the emergency stop flag is set.
+    #[test]
+    fn executor_aborts_when_emergency_stopped() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut exec = GlobalExecutor::new().unwrap().with_stop_flag(flag);
+        assert!(exec.is_stopped());
+        let res = exec.run(&Intent::PressKey { key: Key::Enter });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("emergency stop is active"));
     }
 }

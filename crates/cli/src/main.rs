@@ -10,6 +10,7 @@ pub mod config;
 pub mod executor;
 pub mod listen;
 pub mod pipeline;
+pub mod screen_dump;
 pub mod speaker;
 
 use std::io;
@@ -17,7 +18,8 @@ use std::time::Instant;
 
 pub use executor::CompositeExecutor;
 use nlu::{IntentModel, NeedleConfig, NeedleIntentModel};
-use pipeline::{CliModel, Pipeline, PipelineIo};
+pub use pipeline::CliModel;
+use pipeline::{Pipeline, PipelineIo};
 use reach_core::{Executor, Intent};
 
 /// The model file loaded when `--model` is passed.
@@ -46,6 +48,9 @@ fn main() {
 fn run(args: &[String]) -> Result<(), String> {
     if args.first().map(String::as_str) == Some("listen") {
         return listen::run(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("screen-dump") {
+        return screen_dump::run_screen_dump(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("pipeline") {
         return run_pipeline(&args[1..]);
@@ -234,9 +239,14 @@ fn run_once<M: IntentModel + Send + 'static, E: Executor>(
     let mut input = stdin.lock();
     let mut output = stdout.lock();
     let mut io = PipelineIo::new(&mut input, &mut output);
-    pipeline
+    let outcome = pipeline
         .process(utterance, Instant::now(), &mut io)
-        .map_err(|error| format!("pipeline I/O failed: {error}"))
+        .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+    if pipeline.dry_run() {
+        pipeline::print_dry_run(&outcome, io.output)
+            .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+    }
+    Ok(())
 }
 
 /// Reads typed transcripts from stdin until end of input.
@@ -279,9 +289,13 @@ fn run_interactive<M: IntentModel + Send + 'static, E: Executor>(
             continue;
         }
 
-        pipeline
+        let outcome = pipeline
             .process(transcript, Instant::now(), &mut io)
             .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+        if pipeline.dry_run() {
+            pipeline::print_dry_run(&outcome, io.output)
+                .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+        }
     }
 
     Ok(())

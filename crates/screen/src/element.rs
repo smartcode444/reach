@@ -40,6 +40,84 @@ impl Default for CollectLimits {
     }
 }
 
+impl CollectLimits {
+    /// Limits for web page document and fallback window collection:
+    /// max depth 30, max 400 elements, 3000 ms timeout.
+    pub const DOCUMENT: Self = Self {
+        max_depth: 30,
+        max_elements: 400,
+        timeout: Duration::from_millis(3000),
+    };
+
+    /// Returns the document-specific collection limits (depth 30, 400 elements, 3000 ms).
+    pub fn document() -> Self {
+        Self::DOCUMENT
+    }
+}
+
+/// The chosen collection root, indicating whether a Document was found or fallback occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionRoot<T> {
+    /// A Document control was found; collection starts here.
+    Document(T),
+    /// No Document control was found; collection falls back to the whole window.
+    FallbackWindow(T),
+}
+
+impl<T> CollectionRoot<T> {
+    /// Returns a reference to the underlying element or handle.
+    ///
+    /// # Returns
+    /// A reference to the contained element.
+    pub fn element(&self) -> &T {
+        match self {
+            Self::Document(elem) | Self::FallbackWindow(elem) => elem,
+        }
+    }
+
+    /// Consumes the wrapper, returning the underlying element or handle.
+    ///
+    /// # Returns
+    /// The contained element.
+    pub fn into_element(self) -> T {
+        match self {
+            Self::Document(elem) | Self::FallbackWindow(elem) => elem,
+        }
+    }
+
+    /// Whether a Document control was selected as the root.
+    ///
+    /// # Returns
+    /// `true` if this root is a Document, `false` if it is a fallback window.
+    pub fn is_document(&self) -> bool {
+        matches!(self, Self::Document(_))
+    }
+}
+
+/// Decides whether to start element collection at a Document control or fall back to the window.
+///
+/// If `document` is `Some`, collection starts at the Document control.
+/// If `document` is `None`, collection falls back to `window`.
+/// In both cases, the collection uses document limits (depth 30, 400 elements, 3000 ms).
+///
+/// # Arguments
+/// * `window` - The handle or element representing the foreground window.
+/// * `document` - The optional Document control found inside the window.
+///
+/// # Returns
+/// A [`CollectionRoot`] wrapping either `document` if present, or `window` as fallback,
+/// along with the [`CollectLimits`] to apply.
+pub fn decide_collection_root<T>(
+    window: T,
+    document: Option<T>,
+) -> (CollectionRoot<T>, CollectLimits) {
+    let limits = CollectLimits::DOCUMENT;
+    match document {
+        Some(doc) => (CollectionRoot::Document(doc), limits),
+        None => (CollectionRoot::FallbackWindow(window), limits),
+    }
+}
+
 /// The successful method used to act on an on-screen element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionMethod {
@@ -81,6 +159,8 @@ pub enum ActionOutcome {
 pub struct LiveElement {
     /// Metadata summary (name, kind, bounding rect, state flags).
     pub summary: ElementSummary,
+    /// Depth of the element relative to collection root.
+    pub depth: usize,
     /// Platform UI Automation element handle on Windows.
     #[cfg(windows)]
     pub(crate) uia_element: Option<UIElement>,
@@ -89,7 +169,7 @@ pub struct LiveElement {
 impl LiveElement {
     /// Creates a new `LiveElement` from an [`ElementSummary`] without a platform handle.
     ///
-    /// Useful for testing pure logic without Windows accessibility dependencies.
+    /// Sets `depth` to 0. Useful for testing pure logic without Windows accessibility dependencies.
     ///
     /// # Arguments
     /// * `summary` - The element summary metadata.
@@ -99,6 +179,24 @@ impl LiveElement {
     pub fn from_summary(summary: ElementSummary) -> Self {
         Self {
             summary,
+            depth: 0,
+            #[cfg(windows)]
+            uia_element: None,
+        }
+    }
+
+    /// Creates a new `LiveElement` from an [`ElementSummary`] and traversal depth.
+    ///
+    /// # Arguments
+    /// * `summary` - The element summary metadata.
+    /// * `depth` - Traversal depth relative to collection root.
+    ///
+    /// # Returns
+    /// A new `LiveElement` wrapping `summary` with the specified `depth`.
+    pub fn from_summary_with_depth(summary: ElementSummary, depth: usize) -> Self {
+        Self {
+            summary,
+            depth,
             #[cfg(windows)]
             uia_element: None,
         }
@@ -216,11 +314,44 @@ fn map_control_type(ct: ControlType) -> ControlKind {
         ControlType::TabItem => ControlKind::TabItem,
         ControlType::ListItem => ControlKind::ListItem,
         ControlType::RadioButton => ControlKind::RadioButton,
+        ControlType::Document => ControlKind::Document,
         _ => ControlKind::Other,
     }
 }
 
+/// Searches descendant elements of `root` for a Document control (the web page).
+///
+/// Uses a depth-bounded search with zero timeout to check if the window contains a web page
+/// without blocking if none is present.
+///
+/// # Arguments
+/// * `auto` - UI Automation instance.
+/// * `root` - Root UI element of the foreground window.
+///
+/// # Returns
+/// The Document [`UIElement`] if found, or `None` if the window contains no Document control.
+#[cfg(windows)]
+fn find_document_control(auto: &UIAutomation, root: &UIElement) -> Option<UIElement> {
+    if let Ok(ct) = root.get_control_type()
+        && ct == ControlType::Document
+    {
+        return Some(root.clone());
+    }
+
+    auto.create_matcher()
+        .from_ref(root)
+        .control_type(ControlType::Document)
+        .timeout(0)
+        .depth(15)
+        .find_first()
+        .ok()
+}
+
 /// Collects live elements from the active foreground window using a custom foreground finder.
+///
+/// If the foreground window contains a Document control (the web page), collection starts at
+/// that Document with its own limits (depth 30, 400 elements, 3000 ms). If no Document exists,
+/// it falls back to the whole window with the same limits.
 ///
 /// # Arguments
 /// * `finder` - Strategy for obtaining the foreground window handle.
@@ -247,7 +378,15 @@ pub fn collect_foreground_with<F: ForegroundFinder>(
             .create_tree_walker()
             .map_err(|e| ScreenError::Automation(e.to_string()))?;
 
-        collect_tree(&root, &walker, limits)
+        let doc = find_document_control(&auto, &root);
+        let (collection_root, chosen_limits) = decide_collection_root(root, doc);
+        let effective_limits = if limits == CollectLimits::default() {
+            chosen_limits
+        } else {
+            limits
+        };
+
+        collect_tree(collection_root.element(), &walker, effective_limits)
     }
     #[cfg(not(windows))]
     {
@@ -260,8 +399,12 @@ pub fn collect_foreground_with<F: ForegroundFinder>(
 
 /// Collects live elements from the active foreground window using the system default finder.
 ///
+/// If the foreground window contains a Document control (the web page), collection starts at
+/// that Document with its own limits (depth 30, 400 elements, 3000 ms). If no Document exists,
+/// it falls back to the whole window with the same limits.
+///
 /// # Arguments
-/// * `limits` - Traversal budget constraints.
+/// * `limits` - Traversal budget constraints. Defaults to [`CollectLimits::DOCUMENT`].
 ///
 /// # Returns
 /// A [`CollectResult`] containing live elements and truncation status.
@@ -325,6 +468,7 @@ fn collect_tree(
 
         elements.push(LiveElement {
             summary,
+            depth,
             uia_element: Some(current.clone()),
         });
 
@@ -468,7 +612,7 @@ pub fn type_text_in(
 /// # Errors
 /// Returns [`ScreenError`] if foreground window collection fails.
 pub fn click_element(label: &str) -> Result<ActionOutcome, ScreenError> {
-    let collected = collect_foreground(CollectLimits::default())?;
+    let collected = collect_foreground(CollectLimits::DOCUMENT)?;
     Ok(click_element_in(
         label,
         &collected.elements,
@@ -487,7 +631,7 @@ pub fn click_element(label: &str) -> Result<ActionOutcome, ScreenError> {
 /// # Errors
 /// Returns [`ScreenError`] if foreground window collection fails.
 pub fn focus_field(label: &str) -> Result<ActionOutcome, ScreenError> {
-    let collected = collect_foreground(CollectLimits::default())?;
+    let collected = collect_foreground(CollectLimits::DOCUMENT)?;
     Ok(focus_field_in(
         label,
         &collected.elements,
@@ -507,7 +651,7 @@ pub fn focus_field(label: &str) -> Result<ActionOutcome, ScreenError> {
 /// # Errors
 /// Returns [`ScreenError`] if foreground window collection fails.
 pub fn type_text(text: &str, field: Option<&str>) -> Result<ActionOutcome, ScreenError> {
-    let collected = collect_foreground(CollectLimits::default())?;
+    let collected = collect_foreground(CollectLimits::DOCUMENT)?;
     Ok(type_text_in(
         text,
         field,
@@ -750,6 +894,60 @@ mod tests {
         let finder = FailingFinder;
         let res = collect_foreground_with(&finder, CollectLimits::default());
         assert!(matches!(res, Err(ScreenError::NoForegroundWindow)));
+    }
+
+    /// Tests document-specific collection limits match depth 30, 400 elements, 3000 ms timeout.
+    #[test]
+    fn collect_limits_document() {
+        let limits = CollectLimits::DOCUMENT;
+        assert_eq!(limits.max_depth, 30);
+        assert_eq!(limits.max_elements, 400);
+        assert_eq!(limits.timeout, Duration::from_millis(3000));
+        assert_eq!(CollectLimits::document(), limits);
+    }
+
+    /// Tests that the fallback decision selects the Document root with document limits when a Document exists.
+    #[test]
+    fn fallback_decision_prefers_document_when_present() {
+        let window = "window_handle";
+        let document = Some("document_handle");
+        let (root, limits) = decide_collection_root(window, document);
+        assert_eq!(root, CollectionRoot::Document("document_handle"));
+        assert!(root.is_document());
+        assert_eq!(root.into_element(), "document_handle");
+        assert_eq!(limits, CollectLimits::DOCUMENT);
+    }
+
+    /// Tests that the fallback decision falls back to the whole window with the same limits when no Document exists.
+    #[test]
+    fn fallback_decision_falls_back_to_window_when_document_missing() {
+        let window = "window_handle";
+        let document: Option<&str> = None;
+        let (root, limits) = decide_collection_root(window, document);
+        assert_eq!(root, CollectionRoot::FallbackWindow("window_handle"));
+        assert!(!root.is_document());
+        assert_eq!(root.into_element(), "window_handle");
+        assert_eq!(limits, CollectLimits::DOCUMENT);
+    }
+
+    /// Tests that LiveElement correctly retains depth metadata.
+    #[test]
+    fn live_element_depth_tracking() {
+        let summary = ElementSummary {
+            name: "Test Button".to_owned(),
+            kind: ControlKind::Button,
+            rect: Rect {
+                left: 0,
+                top: 0,
+                right: 50,
+                bottom: 20,
+            },
+            enabled: true,
+            offscreen: false,
+            is_password: false,
+        };
+        let elem = LiveElement::from_summary_with_depth(summary, 7);
+        assert_eq!(elem.depth, 7);
     }
 
     /// Manual integration test to run against a real Windows desktop or demo form.

@@ -1,0 +1,17 @@
+[package]
+name = "reach-app"
+version = "0.1.0"
+edition = "2024"
+description = "Always-on-top status window for Reach"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+reach-runtime = { version = "0.1.0", path = "../runtime" }
+serde = { version = "=1.0.229", features = ["derive"] }
+tauri = { version = "=2.12.5", features = [] }
+
+[lints]
+workspace = true

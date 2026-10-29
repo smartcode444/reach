@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Reach",
+  "version": "0.1.0",
+  "identifier": "com.thinkers.reach",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "status",
+        "title": "Reach Status",
+        "width": 640,
+        "height": 240,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "visible": false,
+        "shadow": false,
+        "transparent": true,
+        "noRedirectionBitmap": true
+      },
+      {
+        "label": "overlay",
+        "title": "Reach Overlay",
+        "url": "overlay.html",
+        "fullscreen": true,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "visible": false,
+        "shadow": false,
+        "transparent": true,
+        "noRedirectionBitmap": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "capabilities": [
+        {
+          "identifier": "status-window",
+          "windows": ["status", "overlay"],
+          "permissions": ["core:default"]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

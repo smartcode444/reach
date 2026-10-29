@@ -1,0 +1,119 @@
+:root {
+  color-scheme: dark;
+  --ink: #f8fafc;
+  --muted: #cbd5e1;
+  --panel: #0b1220;
+  --edge: #475569;
+  --accent: #22c55e;
+  --warn: #fbbf24;
+  --error: #f87171;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.card {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 18px 26px;
+  border: 2px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  color: var(--ink);
+  overflow: hidden;
+}
+
+.card[data-tone="listening"] {
+  border-color: var(--accent);
+}
+
+.card[data-tone="confirming"] {
+  border-color: var(--warn);
+}
+
+.card[data-tone="error"],
+.card[data-tone="stopped"] {
+  border-color: var(--error);
+}
+
+.topline {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+}
+
+.indicator {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--edge);
+  box-shadow: 0 0 0 4px rgba(71, 85, 105, 0.18);
+  flex: none;
+}
+
+.indicator[data-tone="listening"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.22);
+}
+
+.indicator[data-tone="confirming"] {
+  background: var(--warn);
+  box-shadow: 0 0 0 4px rgba(251, 191, 36, 0.22);
+}
+
+.indicator[data-tone="error"],
+.indicator[data-tone="stopped"] {
+  background: var(--error);
+  box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.22);
+}
+
+.state {
+  font-size: 52px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.heard {
+  margin: 14px 0 0;
+  color: var(--ink);
+  font-size: 21px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.result {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 19px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

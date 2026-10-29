@@ -50,6 +50,8 @@ pub enum ControlKind {
     ListItem,
     /// A radio selection button.
     RadioButton,
+    /// A document control, such as a web page body.
+    Document,
     /// Any other control type not specifically categorised.
     Other,
 }

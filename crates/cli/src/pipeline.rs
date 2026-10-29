@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use nlu::tools::ToolSpec;
 use nlu::wake::{GateResult, WakeConfig, WakeSession};
-use nlu::{CLARIFY_QUESTION, IntentModel, ModelError, ModelReply, NeedleIntentModel, Route};
+use nlu::{
+    CLARIFY_QUESTION, IntentModel, ModelError, ModelReply, NeedleConfig, NeedleIntentModel, Route,
+};
 use reach_core::{Executor, Intent};
 use serde_json::{Map, Value};
 
@@ -86,6 +88,28 @@ pub enum PipelineModel {
     #[cfg(test)]
     /// Scripted fake model for unit tests.
     Scripted(nlu::ScriptedModel),
+}
+
+impl PipelineModel {
+    /// Creates a disabled model wrapper that rejects all utterances.
+    pub fn disabled() -> Self {
+        Self::Disabled(DisabledModel)
+    }
+
+    /// Loads the Needle model from the given container file.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the `needle3.cact` file.
+    ///
+    /// # Returns
+    /// An instance of [`PipelineModel::Needle`].
+    ///
+    /// # Errors
+    /// Returns an error if the model fails to load.
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, ModelError> {
+        let model = NeedleIntentModel::load(path, NeedleConfig::default())?;
+        Ok(Self::Needle(Box::new(model)))
+    }
 }
 
 impl IntentModel for PipelineModel {
@@ -360,6 +384,11 @@ impl<M, E> Pipeline<M, E> {
         &mut self.executor
     }
 
+    /// Returns whether this pipeline is configured for dry-run mode.
+    pub fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
     /// Sets the timeout for Needle model calls.
     ///
     /// # Arguments
@@ -480,7 +509,7 @@ impl<M: IntentModel + Send + 'static, E: Executor> Pipeline<M, E> {
         transcript: &str,
         now: Instant,
         io: &mut PipelineIo<'_>,
-    ) -> io::Result<()> {
+    ) -> io::Result<StepOutcome> {
         self.last_route_duration = Duration::ZERO;
         self.last_rules_duration = Duration::ZERO;
         self.last_needle_duration = Duration::ZERO;
@@ -489,16 +518,51 @@ impl<M: IntentModel + Send + 'static, E: Executor> Pipeline<M, E> {
         match self.session.evaluate(transcript, now) {
             GateResult::Ignored => {
                 self.last_route_duration = route_start.elapsed();
-                writeln!(io.output, "ignored")
+                writeln!(io.output, "ignored")?;
+                Ok(StepOutcome::Ignored)
             }
             GateResult::WakeOnly => {
                 self.last_route_duration = route_start.elapsed();
-                writeln!(io.output, "listening")
+                writeln!(io.output, "listening")?;
+                Ok(StepOutcome::WakeOnly)
             }
             GateResult::Command(command) => {
                 let route = self.route_command(&command);
                 self.last_route_duration = route_start.elapsed();
-                self.handle_route(route, io)
+                let chosen_intent = match &route {
+                    Route::Run(intent) | Route::Confirm(intent) => Some(intent.clone()),
+                    _ => None,
+                };
+
+                if self.dry_run {
+                    return Ok(StepOutcome::Handled {
+                        route,
+                        chosen_intent,
+                        executed: false,
+                    });
+                }
+
+                let executed = match &route {
+                    Route::Run(intent) => {
+                        self.execute(intent, io)?;
+                        true
+                    }
+                    Route::Confirm(intent) => self.confirm_and_report(intent.clone(), io)?,
+                    Route::Clarify => {
+                        writeln!(io.output, "{CLARIFY_QUESTION}")?;
+                        false
+                    }
+                    Route::Reject(reason) => {
+                        writeln!(io.output, "rejected: {reason:?}")?;
+                        false
+                    }
+                };
+
+                Ok(StepOutcome::Handled {
+                    route,
+                    chosen_intent,
+                    executed,
+                })
             }
         }
     }
@@ -523,130 +587,14 @@ impl<M: IntentModel + Send + 'static, E: Executor> Pipeline<M, E> {
         reader: &mut R,
         writer: &mut W,
     ) -> Result<StepOutcome, String> {
-        let gate_result = self.session.evaluate(utterance, now);
-        let command = match gate_result {
-            GateResult::Ignored => {
-                writeln!(writer, "ignored").map_err(|e| e.to_string())?;
-                return Ok(StepOutcome::Ignored);
-            }
-            GateResult::WakeOnly => {
-                writeln!(writer, "listening").map_err(|e| e.to_string())?;
-                return Ok(StepOutcome::WakeOnly);
-            }
-            GateResult::Command(command) => command,
-        };
-
-        let route = self.route_command(&command);
-        let chosen_intent = match &route {
-            Route::Run(intent) | Route::Confirm(intent) => Some(intent.clone()),
-            _ => None,
-        };
-
-        if self.dry_run {
-            writeln!(writer, "{}", route_json(&route)).map_err(|e| e.to_string())?;
-            return Ok(StepOutcome::Handled {
-                route,
-                chosen_intent,
-                executed: false,
-            });
-        }
-
         let mut io = PipelineIo::new(reader, writer);
-        match &route {
-            Route::Run(intent) => {
-                self.execute(intent, &mut io).map_err(|e| e.to_string())?;
-                Ok(StepOutcome::Handled {
-                    route,
-                    chosen_intent,
-                    executed: true,
-                })
-            }
-            Route::Confirm(intent) => {
-                let executed = self
-                    .confirm_and_report(intent.clone(), &mut io)
-                    .map_err(|e| e.to_string())?;
-                Ok(StepOutcome::Handled {
-                    route,
-                    chosen_intent,
-                    executed,
-                })
-            }
-            Route::Clarify => {
-                writeln!(io.output, "{CLARIFY_QUESTION}").map_err(|e| e.to_string())?;
-                Ok(StepOutcome::Handled {
-                    route,
-                    chosen_intent: None,
-                    executed: false,
-                })
-            }
-            Route::Reject(reason) => {
-                writeln!(io.output, "rejected: {reason:?}").map_err(|e| e.to_string())?;
-                Ok(StepOutcome::Handled {
-                    route,
-                    chosen_intent: None,
-                    executed: false,
-                })
-            }
-        }
-    }
-
-    /// Runs interactive line-by-line processing until EOF or exit command.
-    ///
-    /// # Arguments
-    /// * `reader` - Stream to read input lines from.
-    /// * `writer` - Stream to write output responses to.
-    ///
-    /// # Returns
-    /// `Ok(())` on EOF or exit.
-    ///
-    /// # Errors
-    /// Returns an error message if I/O fails.
-    pub fn run_interactive<R: BufRead, W: Write>(
-        &mut self,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> Result<(), String> {
-        let mut line = String::new();
-        while reader.read_line(&mut line).map_err(|e| e.to_string())? > 0 {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-                    break;
-                }
-                let mut io = PipelineIo::new(reader, writer);
-                self.process(trimmed, Instant::now(), &mut io)
-                    .map_err(|e| e.to_string())?;
-            }
-            line.clear();
-        }
-        Ok(())
-    }
-
-    /// Writes or carries out one route.
-    ///
-    /// # Arguments
-    /// * `route` - The decision returned by [`nlu::route_utterance`].
-    /// * `io` - The streams used for confirmation answers and results.
-    ///
-    /// # Returns
-    /// `Ok(())` once the route has been handled.
-    ///
-    /// # Errors
-    /// Returns an I/O error from the streams.
-    fn handle_route(&mut self, route: Route, io: &mut PipelineIo<'_>) -> io::Result<()> {
+        let outcome = self
+            .process(utterance, now, &mut io)
+            .map_err(|e| e.to_string())?;
         if self.dry_run {
-            return writeln!(io.output, "{}", route_json(&route));
+            print_dry_run(&outcome, io.output).map_err(|e| e.to_string())?;
         }
-
-        match route {
-            Route::Run(intent) => self.execute(&intent, io),
-            Route::Confirm(intent) => {
-                let _ = self.confirm_and_report(intent, io)?;
-                Ok(())
-            }
-            Route::Clarify => writeln!(io.output, "{CLARIFY_QUESTION}"),
-            Route::Reject(reason) => writeln!(io.output, "rejected: {reason:?}"),
-        }
+        Ok(outcome)
     }
 
     /// Runs one intent through the executor and writes its message.
@@ -737,6 +685,31 @@ fn read_answer(input: &mut dyn BufRead) -> io::Result<Option<String>> {
 pub fn intent_json(intent: &Intent) -> String {
     serde_json::to_string(intent).unwrap_or_else(|_| "null".to_owned())
 }
+
+/// Prints the JSON description of a routed command for `--dry-run`.
+///
+/// # Arguments
+/// * `outcome` - The result returned by [`Pipeline::process`].
+/// * `output` - Stream that receives the JSON line.
+///
+/// # Returns
+/// `Ok(())` when the line was written, or when the outcome was not a routed
+/// command.
+///
+/// # Errors
+/// Returns an I/O error when writing fails.
+pub fn print_dry_run(outcome: &StepOutcome, output: &mut dyn Write) -> io::Result<()> {
+    if let StepOutcome::Handled { route, .. } = outcome {
+        writeln!(output, "{}", route_json(route))?;
+    }
+    Ok(())
+}
+
+/// The question the CLI prints for a clarification.
+///
+/// Kept here so the CLI output stays identical even if the shared pipeline
+/// changes how it reports the event.
+pub const CLARIFY_TEXT: &str = CLARIFY_QUESTION;
 
 /// Serialises a route and its intent for `--dry-run`.
 ///
@@ -990,9 +963,12 @@ mod tests {
         let mut pipeline = Pipeline::new(model, RecordingExecutor::default(), dry_run);
         {
             let mut io = PipelineIo::new(&mut input, &mut output);
-            pipeline
+            let outcome = pipeline
                 .process(transcript, Instant::now(), &mut io)
                 .unwrap();
+            if dry_run {
+                print_dry_run(&outcome, io.output).unwrap();
+            }
         }
         (
             String::from_utf8(output).unwrap(),
@@ -1347,5 +1323,13 @@ mod tests {
                 target: "Submit".to_owned()
             }]
         );
+    }
+    /// The dry-run helper writes nothing for a line that was not routed.
+    #[test]
+    fn dry_run_helper_ignores_non_commands() {
+        let mut output = Vec::new();
+        print_dry_run(&StepOutcome::Ignored, &mut output).unwrap();
+        assert!(output.is_empty());
+        output.flush().unwrap();
     }
 }
