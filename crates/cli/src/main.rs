@@ -14,8 +14,8 @@ use std::io;
 use std::time::Instant;
 
 pub use executor::CompositeExecutor;
-use nlu::{IntentModel, NeedleConfig, NeedleIntentModel};
-use pipeline::{CliModel, Pipeline, PipelineIo};
+use nlu::IntentModel;
+use pipeline::{Pipeline, PipelineIo, PipelineModel};
 use reach_core::{Executor, Intent};
 
 /// The model file loaded when `--model` is passed.
@@ -122,11 +122,10 @@ fn run_pipeline(args: &[String]) -> Result<(), String> {
     // not pay the load cost again.
     let model = if parsed.model {
         let path = parsed.model_path.as_deref().unwrap_or(DEFAULT_MODEL_PATH);
-        let model = NeedleIntentModel::load(path, NeedleConfig::default())
-            .map_err(|error| format!("failed to load Needle model: {error}"))?;
-        CliModel::Needle(Box::new(model))
+        PipelineModel::load(path)
+            .map_err(|error| format!("failed to load Needle model: {error}"))?
     } else {
-        CliModel::Offline
+        PipelineModel::disabled()
     };
 
     let executor = if parsed.dry_run {
@@ -192,9 +191,14 @@ fn run_once<M: IntentModel, E: Executor>(
     let mut input = stdin.lock();
     let mut output = stdout.lock();
     let mut io = PipelineIo::new(&mut input, &mut output);
-    pipeline
+    let outcome = pipeline
         .process(utterance, Instant::now(), &mut io)
-        .map_err(|error| format!("pipeline I/O failed: {error}"))
+        .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+    if pipeline.dry_run() {
+        pipeline::print_dry_run(&outcome, io.output)
+            .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+    }
+    Ok(())
 }
 
 /// Reads typed transcripts from stdin until end of input.
@@ -237,9 +241,13 @@ fn run_interactive<M: IntentModel, E: Executor>(
             continue;
         }
 
-        pipeline
+        let outcome = pipeline
             .process(transcript, Instant::now(), &mut io)
             .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+        if pipeline.dry_run() {
+            pipeline::print_dry_run(&outcome, io.output)
+                .map_err(|error| format!("pipeline I/O failed: {error}"))?;
+        }
     }
 
     Ok(())
