@@ -8,6 +8,7 @@
 
 pub mod executor;
 pub mod pipeline;
+pub mod screen_dump;
 
 use std::io;
 use std::time::Instant;
@@ -41,6 +42,9 @@ fn main() {
 /// Returns a message for an unknown pipeline option, a model or executor load
 /// failure, or an I/O failure.
 fn run(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) == Some("screen-dump") {
+        return screen_dump::run_screen_dump(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("pipeline") {
         return run_pipeline(&args[1..]);
     }

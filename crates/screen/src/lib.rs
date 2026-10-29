@@ -7,9 +7,10 @@ pub mod error;
 pub mod label;
 
 pub use element::{
-    ActionMethod, ActionOutcome, CollectLimits, CollectResult, ForegroundFinder, LiveElement,
-    SystemForegroundFinder, click_element, click_element_in, collect_foreground,
-    collect_foreground_with, focus_field, focus_field_in, type_text, type_text_in,
+    ActionMethod, ActionOutcome, CollectLimits, CollectResult, CollectionRoot, ForegroundFinder,
+    LiveElement, SystemForegroundFinder, click_element, click_element_in, collect_foreground,
+    collect_foreground_with, decide_collection_root, focus_field, focus_field_in, type_text,
+    type_text_in,
 };
 pub use error::ScreenError;
 pub use label::{
