@@ -63,6 +63,27 @@ const WEB_TLDS: &[&str] = &[
     "store", "tech", "tv", "uk", "website", "world", "xyz",
 ];
 
+/// Application names the rule grammar is allowed to launch.
+///
+/// The executor enforces the same list. Rejecting an unknown name here keeps a
+/// misheard sentence from being treated as an application launch at all.
+const ALLOWED_APPS: &[&str] = &["chrome", "notepad", "explorer"];
+
+/// The largest number of words accepted in a named click target.
+///
+/// Element names are short. A longer phrase is usually ordinary speech such
+/// as "the link in the email I sent", so it is left for clarification.
+const MAX_CLICK_TARGET_WORDS: usize = 4;
+
+/// Words that introduce a click command, used to restore spoken casing.
+const CLICK_TRIGGERS: &[&str] = &["click", "tap", "press", "hit", "choose", "select"];
+
+/// Words that introduce a focus command, used to restore spoken casing.
+const FOCUS_TRIGGERS: &[&str] = &["focus", "move", "go"];
+
+/// Words that introduce a window-switch command, used to restore spoken casing.
+const SWITCH_TRIGGERS: &[&str] = &["switch", "bring", "activate"];
+
 /// The result of trying to read a key press from an utterance.
 enum KeyAttempt {
     /// The words do not ask for a key press.
@@ -135,10 +156,10 @@ pub fn parse_rule(utterance: &str) -> Option<Intent> {
         return Some(intent);
     }
     if let Some(intent) = parse_focus(&tokens) {
-        return Some(intent);
+        return Some(restore_intent_case(cleaned, intent));
     }
     if let Some(intent) = parse_switch(&tokens) {
-        return Some(intent);
+        return Some(restore_intent_case(cleaned, intent));
     }
 
     match parse_key(&tokens) {
@@ -148,12 +169,83 @@ pub fn parse_rule(utterance: &str) -> Option<Intent> {
     }
 
     match parse_click(&tokens) {
-        ClickAttempt::Click(intent) => return Some(intent),
+        ClickAttempt::Click(intent) => return Some(restore_intent_case(cleaned, intent)),
         ClickAttempt::Invalid => return None,
         ClickAttempt::NotClick => {}
     }
 
     parse_open(&tokens)
+}
+
+/// Restores the spoken casing of a target that was matched case-insensitively.
+///
+/// # Arguments
+/// * `text` - The utterance after wake words and politeness phrases are
+///   removed, with its original casing.
+/// * `intent` - The intent produced by the lowercase parser.
+///
+/// # Returns
+/// The same intent, with any named click, field or window target replaced by
+/// the words the user actually spoke. Other intents are unchanged.
+fn restore_intent_case(text: &str, intent: Intent) -> Intent {
+    match intent {
+        Intent::ClickElement { target } => Intent::ClickElement {
+            target: restore_spoken_case(text, CLICK_TRIGGERS, &target),
+        },
+        Intent::FocusField { target } => Intent::FocusField {
+            target: restore_spoken_case(text, FOCUS_TRIGGERS, &target),
+        },
+        Intent::SwitchWindow {
+            target: Some(target),
+        } => Intent::SwitchWindow {
+            target: Some(restore_spoken_case(text, SWITCH_TRIGGERS, &target)),
+        },
+        other => other,
+    }
+}
+
+/// Finds `target` in `text` after one of `triggers` and returns its spoken form.
+///
+/// The parser matches lowercase tokens, so this helper walks the original
+/// tokens to recover casing. If the target cannot be found, the lowercase
+/// value is returned unchanged rather than losing the command.
+///
+/// # Arguments
+/// * `text` - The utterance with its original casing.
+/// * `triggers` - The command words that introduce the target.
+/// * `target` - The lowercase target produced by the parser.
+///
+/// # Returns
+/// The matching words joined with spaces, or `target` when no match is found.
+fn restore_spoken_case(text: &str, triggers: &[&str], target: &str) -> String {
+    let original = tokenize_preserving_case(text);
+    let target_words: Vec<String> = target.split_whitespace().map(str::to_lowercase).collect();
+    if target_words.is_empty() {
+        return target.to_owned();
+    }
+    let search_start = original
+        .iter()
+        .position(|token| {
+            let lower = token.to_lowercase();
+            triggers.iter().any(|trigger| lower == *trigger)
+        })
+        .map_or(0, |index| index + 1);
+    let Some(last_start) = original.len().checked_sub(target_words.len()) else {
+        return target.to_owned();
+    };
+    for index in search_start..=last_start {
+        let Some(window) = original.get(index..index + target_words.len()) else {
+            continue;
+        };
+        let matches = window
+            .iter()
+            .zip(target_words.iter())
+            .all(|(spoken, expected)| spoken.to_lowercase() == *expected);
+        if matches {
+            return window.join(" ");
+        }
+    }
+    target.to_owned()
 }
 
 /// Removes wake words and politeness phrases from the start of `text`.
@@ -216,6 +308,29 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Splits `text` into cleaned tokens without changing their casing.
+///
+/// Matching still uses [`tokenize`]; this variant exists so a target or field
+/// that was matched case-insensitively can be returned as the user spoke it.
+///
+/// # Arguments
+/// * `text` - The text to split.
+///
+/// # Returns
+/// Tokens with surrounding punctuation removed and filler words dropped.
+fn tokenize_preserving_case(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(clean_token_preserving_case)
+        .filter(|token| {
+            if token.is_empty() {
+                return false;
+            }
+            let lower = token.to_lowercase();
+            !FILLERS.contains(&lower.as_str())
+        })
+        .collect()
+}
+
 /// Cleans one token for matching.
 ///
 /// # Arguments
@@ -225,11 +340,21 @@ fn tokenize(text: &str) -> Vec<String> {
 /// The lowercase token with typographic quotes normalised and leading or
 /// trailing ASCII punctuation removed.
 fn clean_token(token: &str) -> String {
-    let lowered = token
-        .to_lowercase()
+    clean_token_preserving_case(token).to_lowercase()
+}
+
+/// Cleans one token without lowercasing it.
+///
+/// # Arguments
+/// * `token` - One whitespace-separated word.
+///
+/// # Returns
+/// The token with typographic quotes normalised and leading or trailing ASCII
+/// punctuation removed. Internal punctuation is kept.
+fn clean_token_preserving_case(token: &str) -> String {
+    token
         .replace(['\u{2018}', '\u{2019}'], "'")
-        .replace(['\u{201c}', '\u{201d}'], "\"");
-    lowered
+        .replace(['\u{201c}', '\u{201d}'], "\"")
         .trim_matches(|c: char| c.is_ascii_punctuation())
         .to_owned()
 }
@@ -410,7 +535,7 @@ fn parse_type_text(text: &str) -> Option<Intent> {
     let rest = strip_out_prefix(rest);
     let (text_part, field_part) = split_field(rest);
     let spoken = clean_typed_text(text_part);
-    if spoken.is_empty() {
+    if spoken.is_empty() || is_bare_of_phrase(&spoken) {
         return None;
     }
     let field = field_part.and_then(clean_field);
@@ -418,6 +543,21 @@ fn parse_type_text(text: &str) -> Option<Intent> {
         text: spoken,
         field,
     })
+}
+
+/// Reports whether dictated text is really the start of a noun phrase.
+///
+/// "type of blood" is ordinary speech, not a command. A user who really wants
+/// those words can say "type the words of blood", which this check accepts.
+///
+/// # Arguments
+/// * `text` - The text after the typing trigger.
+///
+/// # Returns
+/// `true` when the text is exactly "of" or begins with "of ".
+fn is_bare_of_phrase(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower == "of" || lower.starts_with("of ")
 }
 
 /// Splits typed text from an optional "into the ... field" suffix.
@@ -465,22 +605,22 @@ fn field_has_noun(field: &str) -> bool {
 /// The remaining words, or `None` when only an article or generic noun is
 /// present.
 fn clean_field(text: &str) -> Option<String> {
-    clean_field_tokens(&tokenize(text))
+    clean_field_tokens(&tokenize_preserving_case(text))
 }
 
 /// Cleans already-tokenised field words into a spoken target.
 ///
 /// # Arguments
-/// * `tokens` - Cleaned field tokens.
+/// * `tokens` - Cleaned field tokens. Their casing is preserved.
 ///
 /// # Returns
 /// The remaining words joined with spaces, or `None` when nothing is left.
 fn clean_field_tokens(tokens: &[String]) -> Option<String> {
     let mut start = 0;
-    if tokens
-        .first()
-        .is_some_and(|token| matches!(token.as_str(), "the" | "a" | "an"))
-    {
+    if tokens.first().is_some_and(|token| {
+        let lower = token.to_lowercase();
+        matches!(lower.as_str(), "the" | "a" | "an")
+    }) {
         start = 1;
     }
     let mut end = tokens.len();
@@ -488,7 +628,8 @@ fn clean_field_tokens(tokens: &[String]) -> Option<String> {
         let Some(last) = tokens.get(end - 1) else {
             break;
         };
-        if !FIELD_NOUNS.contains(&last.as_str()) {
+        let lower = last.to_lowercase();
+        if !FIELD_NOUNS.contains(&lower.as_str()) {
             break;
         }
         end -= 1;
@@ -1150,6 +1291,9 @@ fn parse_click(tokens: &[String]) -> ClickAttempt {
     if target.is_empty() || is_phrase(target, &["number"]) {
         return ClickAttempt::Invalid;
     }
+    if target.len() > MAX_CLICK_TARGET_WORDS {
+        return ClickAttempt::Invalid;
+    }
     let target = target.join(" ");
     if target.is_empty() {
         return ClickAttempt::Invalid;
@@ -1266,12 +1410,7 @@ fn parse_open(tokens: &[String]) -> Option<Intent> {
     }
     if candidate.ends_with(".exe") {
         let name = candidate.strip_suffix(".exe")?.trim();
-        if name.is_empty() {
-            return None;
-        }
-        return Some(Intent::OpenApp {
-            name: name.to_owned(),
-        });
+        return allowed_app_name(name).map(|name| Intent::OpenApp { name });
     }
     if looks_like_web_url(&candidate) {
         return Some(Intent::OpenUrl { url: candidate });
@@ -1283,11 +1422,21 @@ fn parse_open(tokens: &[String]) -> Option<Intent> {
     }
 
     let name = rest.join(" ");
-    if name.is_empty() {
-        None
-    } else {
-        Some(Intent::OpenApp { name })
-    }
+    allowed_app_name(&name).map(|name| Intent::OpenApp { name })
+}
+
+/// Returns the canonical allow-listed application name.
+///
+/// # Arguments
+/// * `name` - The spoken application name.
+///
+/// # Returns
+/// The lowercase name when it is in [`ALLOWED_APPS`], otherwise `None`.
+fn allowed_app_name(name: &str) -> Option<String> {
+    let canonical = name.trim().to_lowercase();
+    ALLOWED_APPS
+        .contains(&canonical.as_str())
+        .then_some(canonical)
 }
 
 /// Joins words into an address, expanding spoken "dot", "slash" and "colon".
@@ -1322,35 +1471,166 @@ fn spoken_candidate(tokens: &[String]) -> String {
 
 /// Reports whether an address is a web URL the executor may open.
 ///
+/// The check is deliberately strict. It accepts a bare `name.tld`, a
+/// `www.` name, or an explicit `http`/`https` address, and then validates the
+/// host labels and the characters in the path. Spaces, control characters,
+/// empty labels, bad percent escapes and non-web schemes are rejected so a
+/// loose spoken phrase cannot become an arbitrary URL.
+///
 /// # Arguments
 /// * `candidate` - The joined address.
 ///
 /// # Returns
-/// `true` for `http`/`https` addresses, `www.` names and bare names whose
-/// last label is in [`WEB_TLDS`].
+/// `true` for a well-formed web address, `false` otherwise.
 fn looks_like_web_url(candidate: &str) -> bool {
-    if candidate.starts_with("http://") {
-        return candidate.len() > "http://".len();
+    if candidate.is_empty() || !candidate.is_ascii() {
+        return false;
     }
-    if candidate.starts_with("https://") {
-        return candidate.len() > "https://".len();
+    if candidate
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return false;
     }
-    if candidate.starts_with("www.") {
-        return candidate.len() > "www.".len();
+    let rest = if let Some(rest) = candidate.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = candidate.strip_prefix("http://") {
+        rest
+    } else if let Some(rest) = candidate.strip_prefix("www.") {
+        rest
+    } else {
+        candidate
+    };
+    let (host, tail) = split_host_and_tail(rest);
+    is_valid_host(host) && is_valid_url_tail(tail)
+}
+
+/// Splits an address into its host and the path, query or fragment.
+///
+/// # Arguments
+/// * `address` - The address after any scheme or `www.` prefix is removed.
+///
+/// # Returns
+/// The host and the remainder, which is empty when there is no path.
+fn split_host_and_tail(address: &str) -> (&str, &str) {
+    match address.find(['/', '?', '#']) {
+        Some(index) => (
+            address.get(..index).unwrap_or(address),
+            address.get(index..).unwrap_or(""),
+        ),
+        None => (address, ""),
     }
-    let host = candidate
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .split('#')
-        .next()
-        .unwrap_or("");
-    let first = host.split('.').next().unwrap_or("");
-    let last = host.rsplit('.').next().unwrap_or("");
-    !first.is_empty() && !last.is_empty() && host.contains('.') && WEB_TLDS.contains(&last)
+}
+
+/// Reports whether `host` is a valid dotted host name with a known web TLD.
+///
+/// # Arguments
+/// * `host` - The host part of the address, without a scheme or path.
+///
+/// # Returns
+/// `true` when every label is non-empty, hyphen-safe and the last label is in
+/// [`WEB_TLDS`].
+fn is_valid_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 || !host.is_ascii() {
+        return false;
+    }
+    let mut labels = 0;
+    let mut last = "";
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        if !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return false;
+        }
+        labels += 1;
+        last = label;
+    }
+    labels >= 2 && WEB_TLDS.iter().any(|tld| tld.eq_ignore_ascii_case(last))
+}
+
+/// Reports whether the path, query or fragment of an address is safe.
+///
+/// # Arguments
+/// * `tail` - The text after the host, or an empty string.
+///
+/// # Returns
+/// `true` when the tail is empty or starts with `/`, `?` or `#` and contains
+/// only permitted URL characters and valid percent escapes.
+fn is_valid_url_tail(tail: &str) -> bool {
+    if tail.is_empty() {
+        return true;
+    }
+    let Some(first) = tail.chars().next() else {
+        return true;
+    };
+    if !matches!(first, '/' | '?' | '#') {
+        return false;
+    }
+    let bytes = tail.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let Some(byte) = bytes.get(index) else {
+            return false;
+        };
+        if *byte == b'%' {
+            let Some(high) = bytes.get(index + 1) else {
+                return false;
+            };
+            let Some(low) = bytes.get(index + 2) else {
+                return false;
+            };
+            if !high.is_ascii_hexdigit() || !low.is_ascii_hexdigit() {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if !is_url_tail_byte(*byte) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Reports whether `byte` may appear in a URL path, query or fragment.
+///
+/// # Arguments
+/// * `byte` - One ASCII byte from the address tail.
+///
+/// # Returns
+/// `true` for unreserved characters and common path separators. Colons and
+/// backslashes are excluded so a path cannot look like another scheme.
+fn is_url_tail_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'/'
+                | b'?'
+                | b'&'
+                | b'='
+                | b'#'
+                | b'+'
+                | b'!'
+                | b'$'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b','
+                | b';'
+                | b'@'
+        )
 }
 
 #[cfg(test)]
@@ -1455,6 +1735,16 @@ mod tests {
         assert_parses("press escape", r#"{"action":"press_key","key":"escape"}"#);
     }
 
+    /// A known key name decides a key press; an unknown name is a click target.
+    #[test]
+    fn known_keys_beat_clicks() {
+        assert_parses("press enter", r#"{"action":"press_key","key":"enter"}"#);
+        assert_parses(
+            "press submit",
+            r#"{"action":"click_element","target":"submit"}"#,
+        );
+    }
+
     /// Keys that the core contract cannot represent are rejected.
     #[test]
     fn rejects_unsupported_keys() {
@@ -1467,6 +1757,8 @@ mod tests {
     fn parses_numbered_clicks() {
         assert_parses("click number 4", r#"{"action":"click_number","n":4}"#);
         assert_parses("click fourteen", r#"{"action":"click_number","n":14}"#);
+        assert_parses("click 14", r#"{"action":"click_number","n":14}"#);
+        assert_parses("tap number fourteen", r#"{"action":"click_number","n":14}"#);
         assert_parses(
             "click the fourteenth",
             r#"{"action":"click_number","n":14}"#,
@@ -1495,6 +1787,38 @@ mod tests {
         );
     }
 
+    /// Named targets keep the casing the user spoke.
+    #[test]
+    fn preserves_target_casing() {
+        assert_parses(
+            "click Submit",
+            r#"{"action":"click_element","target":"Submit"}"#,
+        );
+        assert_parses(
+            "Um, click Submit.",
+            r#"{"action":"click_element","target":"Submit"}"#,
+        );
+        assert_parses(
+            "focus on the Email field",
+            r#"{"action":"focus_field","target":"Email"}"#,
+        );
+        assert_parses(
+            "switch to the Chrome window",
+            r#"{"action":"switch_window","target":"Chrome"}"#,
+        );
+    }
+
+    /// Long phrases are usually ambient speech, not element names.
+    #[test]
+    fn rejects_overlong_click_targets() {
+        assert_no_match("please click on the link in the email I sent");
+        assert_no_match("click the link in the email I sent");
+        assert_parses(
+            "click the save and continue button",
+            r#"{"action":"click_element","target":"save and continue"}"#,
+        );
+    }
+
     /// Typing preserves the spoken text and extracts an optional field.
     #[test]
     fn parses_typing() {
@@ -1506,6 +1830,17 @@ mod tests {
             "type hello into the search box",
             r#"{"action":"type_text","text":"hello","field":"search"}"#,
         );
+        assert_parses(
+            "type hello into the Search Box",
+            r#"{"action":"type_text","text":"hello","field":"Search"}"#,
+        );
+    }
+
+    /// "type of blood" is a noun phrase, not a dictation command.
+    #[test]
+    fn rejects_ambient_type_of_blood() {
+        assert_no_match("type of blood");
+        assert_no_match("type of");
     }
 
     /// Text containing "into the" is not mistaken for a field.
@@ -1537,6 +1872,19 @@ mod tests {
             "open the chrome app",
             r#"{"action":"open_app","name":"chrome"}"#,
         );
+        assert_parses(
+            "open explorer",
+            r#"{"action":"open_app","name":"explorer"}"#,
+        );
+    }
+
+    /// Only allow-listed application names are accepted by the rule parser.
+    #[test]
+    fn rejects_unknown_apps() {
+        assert_no_match("open calculator");
+        assert_no_match("open spotify");
+        assert_no_match("open the window it's hot");
+        assert_no_match("open the door");
     }
 
     /// Non-web schemes are rejected rather than handed to the executor.
@@ -1544,6 +1892,16 @@ mod tests {
     fn rejects_non_web_urls() {
         assert_no_match("open file:///C:/Windows");
         assert_no_match("open javascript:alert(1)");
+    }
+
+    /// Loose dotted phrases and addresses with spaces are not URLs.
+    #[test]
+    fn rejects_loose_web_addresses() {
+        assert_no_match("open hello world dot com");
+        assert_no_match("open example dot com slash hello world");
+        assert_no_match("open foo dot com colon 8080");
+        assert_no_match("open example dot com slash javascript colon alert(1)");
+        assert_no_match("open https://example.com/path with space");
     }
 
     /// Window switching distinguishes a named window from the next one.
@@ -1576,6 +1934,28 @@ mod tests {
         assert_no_match("   ");
         assert_no_match("banana");
         assert_no_match("hello there");
+    }
+
+    /// Extreme inputs are rejected without panicking or splitting a character.
+    #[test]
+    fn handles_extreme_input_without_panicking() {
+        let long_ascii = "a".repeat(10_000);
+        let long_unicode = "é".repeat(10_000);
+        let long_command = format!("click {}", "word ".repeat(5_000));
+        let inputs = [
+            "",
+            "   ",
+            "\t\n",
+            long_ascii.as_str(),
+            long_unicode.as_str(),
+            long_command.as_str(),
+            "🙂🙂",
+            "é",
+            "Ｒｅａｃｈ",
+        ];
+        for input in inputs {
+            let _ = parse_rule(input);
+        }
     }
 
     /// Builds owned tokens for a short test phrase.
@@ -1728,17 +2108,70 @@ mod tests {
         assert!(looks_like_web_url("example.com"));
         assert!(looks_like_web_url("www.example.com"));
         assert!(looks_like_web_url("https://example.com/path"));
+        assert!(looks_like_web_url("example.com/path?q=1"));
+        assert!(looks_like_web_url("https://example.com/path%20name"));
         assert!(!looks_like_web_url("file:///C:/Windows"));
         assert!(!looks_like_web_url("readme.txt"));
         assert!(!looks_like_web_url(".com"));
+        assert!(!looks_like_web_url("hello world.com"));
+        assert!(!looks_like_web_url("example..com"));
+        assert!(!looks_like_web_url("-example.com"));
+        assert!(!looks_like_web_url("https://example.com:8080"));
+        assert!(!looks_like_web_url("https://example.com/%zz"));
+    }
+
+    /// Ambient sentences that must be present in the shared corpus.
+    const REQUIRED_AMBIENT: &[&str] = &[
+        "the volume of sales went up",
+        "I'll call you in five minutes",
+        "I can't reach the top shelf",
+        "let's start the meeting",
+        "please click on the link in the email I sent",
+        "scroll through the report when you have time",
+        "he pressed the button yesterday",
+        "open the window it's hot",
+        "zoom is down again",
+        "type of blood",
+        "tell me a joke",
+        "what is the capital of France",
+        "hello how are you today",
+    ];
+
+    /// Loads the shared utterance corpus.
+    fn load_corpus() -> Vec<serde_json::Value> {
+        serde_json::from_str(include_str!("../../../tests/utterances.json"))
+            .expect("corpus JSON must be valid")
+    }
+
+    /// Returns the stable id for a corpus case, or its 1-based position.
+    fn corpus_case_id(case: &serde_json::Value, index: usize) -> String {
+        case.get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("case-{}", index + 1))
+    }
+
+    /// Reports whether a corpus case is marked as ambient speech.
+    fn is_ambient(case: &serde_json::Value) -> bool {
+        case.get("ambient")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Formats one corpus failure with its id, text, expected and actual intent.
+    fn format_corpus_failure(
+        case_id: &str,
+        utterance: &str,
+        expected: &Option<Intent>,
+        actual: &Option<Intent>,
+    ) -> String {
+        format!("{case_id}: {utterance:?}: expected {expected:?}, got {actual:?}")
     }
 
     /// The shared corpus must contain at least one hundred cases.
     #[test]
     fn utterance_corpus_has_enough_cases() {
-        let cases: Vec<serde_json::Value> =
-            serde_json::from_str(include_str!("../../../tests/utterances.json"))
-                .expect("corpus JSON must be valid");
+        let cases = load_corpus();
         assert!(
             cases.len() >= 100,
             "corpus must hold at least 100 cases, found {}",
@@ -1746,14 +2179,99 @@ mod tests {
         );
     }
 
+    /// The corpus holds at least 25 ambient sentences, all expecting `None`.
+    #[test]
+    fn ambient_corpus_has_at_least_25_cases() {
+        let cases = load_corpus();
+        let ambient: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .filter(|(_, case)| is_ambient(case))
+            .collect();
+        assert!(
+            ambient.len() >= 25,
+            "corpus must hold at least 25 ambient cases, found {}",
+            ambient.len()
+        );
+        for (index, case) in ambient {
+            let case_id = corpus_case_id(case, index);
+            let expected = case
+                .get("intent")
+                .expect("every ambient case needs an intent field");
+            assert!(
+                expected.is_null(),
+                "{case_id}: ambient case must expect null, got {expected}"
+            );
+        }
+    }
+
+    /// Every named ambient sentence from the audit is present in the corpus.
+    #[test]
+    fn required_ambient_sentences_are_present() {
+        let cases = load_corpus();
+        let utterances: Vec<&str> = cases
+            .iter()
+            .filter(|case| is_ambient(case))
+            .filter_map(|case| case.get("utterance").and_then(serde_json::Value::as_str))
+            .collect();
+        for required in REQUIRED_AMBIENT {
+            assert!(
+                utterances.contains(required),
+                "missing ambient case: {required}"
+            );
+        }
+    }
+
+    /// Ambient speech never produces an intent, and failures name the case.
+    #[test]
+    fn ambient_corpus_returns_no_intent() {
+        let cases = load_corpus();
+        let mut failures = Vec::new();
+        for (index, case) in cases.iter().enumerate() {
+            if !is_ambient(case) {
+                continue;
+            }
+            let case_id = corpus_case_id(case, index);
+            let utterance = case
+                .get("utterance")
+                .and_then(serde_json::Value::as_str)
+                .expect("every ambient case needs an utterance");
+            if let Some(intent) = parse_rule(utterance) {
+                failures.push(format_corpus_failure(
+                    &case_id,
+                    utterance,
+                    &None,
+                    &Some(intent),
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} ambient false positives:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    /// Failure text includes the case id and the spoken text.
+    #[test]
+    fn corpus_failure_message_includes_case_id_and_text() {
+        let actual = Some(Intent::ClickElement {
+            target: "link".to_owned(),
+        });
+        let message =
+            format_corpus_failure("ambient-05", "please click on the link", &None, &actual);
+        assert!(message.contains("ambient-05"));
+        assert!(message.contains("please click on the link"));
+    }
+
     /// Every case in the shared corpus parses as expected.
     #[test]
     fn utterance_corpus_matches_rule_grammar() {
-        let cases: Vec<serde_json::Value> =
-            serde_json::from_str(include_str!("../../../tests/utterances.json"))
-                .expect("corpus JSON must be valid");
+        let cases = load_corpus();
         let mut failures = Vec::new();
-        for case in cases {
+        for (index, case) in cases.iter().enumerate() {
+            let case_id = corpus_case_id(case, index);
             let utterance = case
                 .get("utterance")
                 .and_then(serde_json::Value::as_str)
@@ -1771,8 +2289,8 @@ mod tests {
             };
             let actual = parse_rule(utterance);
             if actual != expected {
-                failures.push(format!(
-                    "{utterance:?}: expected {expected:?}, got {actual:?}"
+                failures.push(format_corpus_failure(
+                    &case_id, utterance, &expected, &actual,
                 ));
             }
         }
