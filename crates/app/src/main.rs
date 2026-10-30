@@ -16,27 +16,89 @@
 //! the P9 overlays without changing the window model.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead};
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use reach_runtime::{
-    CompositeExecutor, ErrorKind, OverlayEvent, Pipeline, PipelineModel, Rect, StatusEvent,
-    run_worker,
+    CompositeExecutor, ConfigOverrides, ErrorKind, InputSource, OverlayEvent, PausingExecutor,
+    PhrasesConfig, Pipeline, PipelineModel, ReachConfig, Rect, StatusEvent, VoiceInput,
+    run_worker_source,
 };
 use serde::Serialize;
 use tauri::{Emitter, Manager, PhysicalPosition, WebviewWindow};
 
-/// The model file used when `REACH_MODEL` is not set and the file exists.
+/// Command line options accepted by reach-app.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AppArgs {
+    /// Select typed input from stdin instead of microphone.
+    text: bool,
+    /// Path to Whisper GGML model container.
+    stt_model: Option<String>,
+    /// Path to config/reach.toml.
+    config_path: Option<String>,
+    /// Whether to force rules-only (offline).
+    no_model: bool,
+    /// Path to Needle model container.
+    model_path: Option<String>,
+    /// Whether to explicitly enable Needle model.
+    model: bool,
+    /// Print route decisions instead of executing.
+    dry_run: bool,
+}
+
+/// Parses command line arguments for reach-app.
 ///
-/// TODO(config): read the path from the TOML configuration once that crate
-/// exists, instead of probing the working directory.
-const DEFAULT_MODEL_PATH: &str = "models/needle3.cact";
+/// # Arguments
+/// * `args` - Raw command-line arguments (including argv[0]).
+///
+/// # Returns
+/// The parsed [`AppArgs`].
+///
+/// # Errors
+/// Returns an error message for unknown flags or missing arguments.
+fn parse_app_args(args: &[String]) -> Result<AppArgs, String> {
+    let mut parsed = AppArgs::default();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--text" => parsed.text = true,
+            "--no-model" => parsed.no_model = true,
+            "--model" => {
+                parsed.model = true;
+                if let Some(next) = args.get(index + 1).filter(|next| {
+                    !next.starts_with("--")
+                        && (next.ends_with(".cact")
+                            || next.ends_with(".bin")
+                            || next.contains('/')
+                            || next.contains('\\'))
+                }) {
+                    parsed.model_path = Some(next.clone());
+                    index += 1;
+                }
+            }
+            "--dry-run" => parsed.dry_run = true,
+            "--stt-model" => {
+                index += 1;
+                let path = args.get(index).ok_or("missing path after --stt-model")?;
+                parsed.stt_model = Some(path.clone());
+            }
+            "--config" => {
+                index += 1;
+                let path = args.get(index).ok_or("missing path after --config")?;
+                parsed.config_path = Some(path.clone());
+            }
+            unknown => return Err(format!("unknown option: {unknown}")),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
 
 /// How long the worker pauses before executing a typed command.
 ///
@@ -73,10 +135,29 @@ fn main() {
 /// Returns a message when the status or overlay window is missing, click-through cannot
 /// be enabled, or Tauri fails to start.
 fn run() -> Result<(), String> {
-    let (line_sender, line_receiver) = mpsc::channel::<String>();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let args = parse_app_args(&raw_args)?;
+
+    let config_path = args.config_path.as_deref().unwrap_or("config/reach.toml");
+    let mut config = ReachConfig::load_or_default(config_path)?;
+    config.apply_overrides(&ConfigOverrides {
+        model: args.model,
+        no_model: args.no_model,
+        no_voice: false,
+        model_path: args.model_path.clone(),
+        stt_model: args.stt_model.clone(),
+        start_threshold: None,
+        min_speech_ms: None,
+    });
+
+    let phrases = PhrasesConfig::load_or_default("config/phrases.toml").unwrap_or_default();
+
     let (status_sender, status_receiver) = mpsc::channel::<StatusEvent>();
     let (overlay_sender, overlay_receiver) = mpsc::channel::<OverlayEvent>();
     let history = Arc::new(Mutex::new(StatusHistory::new()));
+
+    let app_args = args;
+    let app_config = config;
 
     tauri::Builder::default()
         .manage(LatestStatus(Arc::clone(&history)))
@@ -104,8 +185,7 @@ fn run() -> Result<(), String> {
             // The forwarders start before the worker so events reach the windows.
             spawn_status_forwarder(window, status_receiver, history);
             spawn_overlay_forwarder(overlay, overlay_receiver);
-            spawn_worker(line_receiver, status_sender, overlay_sender);
-            spawn_console_reader(line_sender);
+            spawn_worker(status_sender, overlay_sender, app_args, app_config, phrases);
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -257,44 +337,40 @@ impl From<StatusEvent> for WireStatus {
     }
 }
 
-/// Builds the voice loop's model.
-///
-/// `REACH_MODEL` wins when set. Otherwise the default model is used only if it
-/// exists, so a clean checkout runs the rule grammar offline instead of failing
-/// at startup.
-///
-/// # Returns
-/// The loaded model, or the disabled model when no file is configured.
-///
-/// # Errors
-/// Returns [`ErrorKind::Model`] when an explicitly configured model cannot be
-/// loaded. The worker reports the kind and stops; the error text is not shown.
-fn load_model() -> Result<PipelineModel, ErrorKind> {
-    let configured = std::env::var_os("REACH_MODEL").map(PathBuf::from);
-    let path = configured.or_else(|| {
-        let default = PathBuf::from(DEFAULT_MODEL_PATH);
-        default.exists().then_some(default)
-    });
-
-    match path {
-        Some(path) => PipelineModel::load(path).map_err(|_| ErrorKind::Model),
-        None => Ok(PipelineModel::disabled()),
-    }
-}
-
-/// Starts the worker thread that owns the shared pipeline.
+/// Builds the pipeline's intent model based on configuration and overrides.
 ///
 /// # Arguments
-/// * `lines` - Transcripts from the console until audio/STT land.
+/// * `config` - Loaded reach configuration.
+///
+/// # Returns
+/// A [`PipelineModel`] instance.
+///
+/// # Errors
+/// Returns [`ErrorKind::Model`] if model file is specified but cannot be loaded.
+fn load_model(config: &ReachConfig) -> Result<PipelineModel, ErrorKind> {
+    if config.no_model {
+        return Ok(PipelineModel::disabled());
+    }
+    PipelineModel::load(&config.needle_model).map_err(|_| ErrorKind::Model)
+}
+
+/// Starts the worker thread that owns the shared pipeline and input source.
+///
+/// # Arguments
 /// * `status` - Sink for status events.
 /// * `overlay` - Sink for overlay visual events.
+/// * `args` - Application command-line arguments.
+/// * `config` - Reach configuration settings.
+/// * `phrases` - Custom phrase rewrites.
 fn spawn_worker(
-    lines: Receiver<String>,
     status: Sender<StatusEvent>,
     overlay: Sender<OverlayEvent>,
+    args: AppArgs,
+    config: ReachConfig,
+    phrases: PhrasesConfig,
 ) {
     thread::spawn(move || {
-        let model = match load_model() {
+        let model = match load_model(&config) {
             Ok(model) => model,
             Err(kind) => {
                 let _ = status.send(StatusEvent::Error { kind });
@@ -302,6 +378,7 @@ fn spawn_worker(
                 return;
             }
         };
+
         let executor = match CompositeExecutor::new() {
             Ok(executor) => executor.with_overlay_sender(overlay),
             Err(_) => {
@@ -313,9 +390,45 @@ fn spawn_worker(
             }
         };
 
-        let mut pipeline =
-            Pipeline::new(model, executor, false).with_execution_delay(TYPED_COMMAND_DELAY);
-        let _ = run_worker(&mut pipeline, &lines, &status);
+        let wake_config = config.to_wake_config();
+
+        if args.text {
+            let (line_sender, line_receiver) = mpsc::channel::<String>();
+            spawn_console_reader(line_sender);
+
+            let mut pipeline =
+                Pipeline::with_wake_config(model, executor, args.dry_run, wake_config)
+                    .with_phrases(phrases)
+                    .with_execution_delay(TYPED_COMMAND_DELAY);
+
+            let mut input = InputSource::Text(line_receiver);
+            let _ = run_worker_source(&mut pipeline, &mut input, &status);
+        } else {
+            let (voice, control) = match VoiceInput::create_default(
+                &config.stt_model,
+                config.whisper_threads,
+                config.endpoint.to_endpoint_config(),
+            ) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    eprintln!("reach-app: voice capture failed: {error}");
+                    let _ = status.send(StatusEvent::Error {
+                        kind: ErrorKind::Internal,
+                    });
+                    let _ = status.send(StatusEvent::Stopped);
+                    return;
+                }
+            };
+
+            let pausing_executor = PausingExecutor::new(executor, Box::new(control));
+
+            let mut pipeline =
+                Pipeline::with_wake_config(model, pausing_executor, args.dry_run, wake_config)
+                    .with_phrases(phrases);
+
+            let mut input = InputSource::Voice(Box::new(voice));
+            let _ = run_worker_source(&mut pipeline, &mut input, &status);
+        }
     });
 }
 
@@ -555,4 +668,58 @@ enum WireOverlayPayload {
     HideGrid,
     /// Clear all overlay visuals.
     Clear,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tests that default arguments set expected flags.
+    #[test]
+    fn parse_default_app_args() {
+        let args = vec!["reach-app".to_owned()];
+        let parsed = parse_app_args(&args).expect("valid args");
+        assert!(!parsed.text);
+        assert!(!parsed.no_model);
+        assert!(!parsed.model);
+        assert!(!parsed.dry_run);
+        assert_eq!(parsed.stt_model, None);
+        assert_eq!(parsed.config_path, None);
+    }
+
+    /// Tests that text input flag is recognized.
+    #[test]
+    fn parse_text_flag() {
+        let args = vec!["reach-app".to_owned(), "--text".to_owned()];
+        let parsed = parse_app_args(&args).expect("valid args");
+        assert!(parsed.text);
+    }
+
+    /// Tests that explicit config and model paths are parsed.
+    #[test]
+    fn parse_explicit_paths() {
+        let args = vec![
+            "reach-app".to_owned(),
+            "--config".to_owned(),
+            "custom.toml".to_owned(),
+            "--stt-model".to_owned(),
+            "whisper.bin".to_owned(),
+            "--model".to_owned(),
+            "models/needle.cact".to_owned(),
+            "--dry-run".to_owned(),
+        ];
+        let parsed = parse_app_args(&args).expect("valid args");
+        assert_eq!(parsed.config_path.as_deref(), Some("custom.toml"));
+        assert_eq!(parsed.stt_model.as_deref(), Some("whisper.bin"));
+        assert_eq!(parsed.model_path.as_deref(), Some("models/needle.cact"));
+        assert!(parsed.model);
+        assert!(parsed.dry_run);
+    }
+
+    /// Tests that unknown options return an error.
+    #[test]
+    fn parse_unknown_option_fails() {
+        let args = vec!["reach-app".to_owned(), "--invalid".to_owned()];
+        assert!(parse_app_args(&args).is_err());
+    }
 }

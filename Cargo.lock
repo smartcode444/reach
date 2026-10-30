@@ -4232,10 +4232,15 @@ dependencies = [
 name = "reach-runtime"
 version = "0.1.0"
 dependencies = [
+ "audio",
  "exec",
  "nlu",
  "reach-core",
  "screen",
+ "serde",
+ "serde_json",
+ "stt",
+ "toml 0.8.2",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@
 wake_word = "reach"
 
 # Alternative words accepted as the wake word (case-insensitive).
-aliases = ["rich", "ridge", "reach"]
+aliases = ["rich", "ridge", "reach", "which"]
 
 # Duration in seconds the listening window stays open after a bare wake word (3 to 120).
 window_seconds = 15
@@ -38,7 +38,7 @@ start_threshold = 0.03
 end_threshold = 0.008
 
 # Minimum voiced duration in milliseconds required to keep an utterance.
-min_speech_ms = 400
+min_speech_ms = 200
 
 # Continuous trailing silence in milliseconds required to end an utterance.
 end_silence_ms = 700

@@ -27,6 +27,12 @@ const PREFIX_PHRASES: &[&str] = &[
     "hey reach",
     "okay reach",
     "ok reach",
+    "hey rich",
+    "okay rich",
+    "ok rich",
+    "hey ridge",
+    "okay ridge",
+    "ok ridge",
     "go ahead and",
     "can you",
     "could you",
@@ -35,6 +41,8 @@ const PREFIX_PHRASES: &[&str] = &[
     "please",
     "kindly",
     "reach",
+    "rich",
+    "ridge",
     "just",
 ];
 
@@ -779,6 +787,37 @@ fn strip_surrounding_quotes(text: &str) -> &str {
     text
 }
 
+/// Strips leading and trailing wake words and wake-word aliases.
+///
+/// Removes "reach", "rich", and "ridge" from the front and back of control tokens.
+///
+/// # Arguments
+/// * `tokens` - Cleaned utterance tokens.
+///
+/// # Returns
+/// A subslice of `tokens` with wake words removed.
+fn strip_wake_tokens(mut tokens: &[String]) -> &[String] {
+    loop {
+        let mut stripped = false;
+        for wake in ["reach", "rich", "ridge"] {
+            if let Some(rest) = strip_phrase_prefix(tokens, &[wake]) {
+                tokens = rest;
+                stripped = true;
+                break;
+            }
+            if let Some(rest) = strip_phrase_suffix(tokens, &[wake]) {
+                tokens = rest;
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    tokens
+}
+
 /// Parses yes/no/cancel/undo answers.
 ///
 /// # Arguments
@@ -787,6 +826,7 @@ fn strip_surrounding_quotes(text: &str) -> &str {
 /// # Returns
 /// The matching control intent, or `None` when the words are not an answer.
 fn parse_control(tokens: &[String]) -> Option<Intent> {
+    let tokens = strip_wake_tokens(tokens);
     let tokens = strip_trailing_politeness(tokens);
     let tokens = strip_phrase_suffix(tokens, &["a", "bit"])
         .or_else(|| strip_phrase_suffix(tokens, &["a", "little"]))
@@ -795,21 +835,25 @@ fn parse_control(tokens: &[String]) -> Option<Intent> {
     match tokens {
         [word] => match word.as_str() {
             "yes" | "yeah" | "yep" | "sure" | "okay" | "ok" | "confirm" | "correct"
-            | "affirmative" => Some(Intent::Confirm),
-            "no" | "nope" | "nah" | "deny" | "negative" => Some(Intent::Deny),
+            | "affirmative" | "proceed" | "continue" => Some(Intent::Confirm),
+            "no" | "nope" | "nah" | "deny" | "negative" | "dont" | "don't" => Some(Intent::Deny),
             "cancel" | "stop" | "abort" | "nevermind" => Some(Intent::Cancel),
             "undo" => Some(Intent::Undo),
             _ => None,
         },
         [first, second] => match (first.as_str(), second.as_str()) {
             ("do", "it") | ("go", "ahead") | ("that's", "right") => Some(Intent::Confirm),
+            ("yes", "please") | ("yes", "confirm") | ("yes", "do") => Some(Intent::Confirm),
             ("no", "thanks") => Some(Intent::Deny),
             ("never", "mind") | ("forget", "it") | ("cancel", "that") => Some(Intent::Cancel),
             ("undo", "that") | ("undo", "last") => Some(Intent::Undo),
             _ => None,
         },
         [first, second, third] => match (first.as_str(), second.as_str(), third.as_str()) {
-            ("no", "thank", "you") => Some(Intent::Deny),
+            ("yes", "do", "it") | ("yes", "go", "ahead") => Some(Intent::Confirm),
+            ("no", "thank", "you") | ("don't", "do", "it") | ("dont", "do", "it") => {
+                Some(Intent::Deny)
+            }
             _ => None,
         },
         _ => None,
@@ -1879,6 +1923,16 @@ mod tests {
         assert_parses("yes", r#"{"action":"confirm"}"#);
         assert_parses("yes please", r#"{"action":"confirm"}"#);
         assert_parses("go ahead", r#"{"action":"confirm"}"#);
+        assert_parses("reach yes", r#"{"action":"confirm"}"#);
+        assert_parses("Reach, yes", r#"{"action":"confirm"}"#);
+        assert_parses("reach, yes.", r#"{"action":"confirm"}"#);
+        assert_parses("rich yes", r#"{"action":"confirm"}"#);
+        assert_parses("ridge yes", r#"{"action":"confirm"}"#);
+        assert_parses("yes reach", r#"{"action":"confirm"}"#);
+        assert_parses("proceed", r#"{"action":"confirm"}"#);
+        assert_parses("continue", r#"{"action":"confirm"}"#);
+        assert_parses("yes do it", r#"{"action":"confirm"}"#);
+        assert_parses("reach do it", r#"{"action":"confirm"}"#);
     }
 
     /// No-like answers deny the pending action.
@@ -1886,6 +1940,10 @@ mod tests {
     fn parses_denial() {
         assert_parses("no", r#"{"action":"deny"}"#);
         assert_parses("no thank you", r#"{"action":"deny"}"#);
+        assert_parses("reach no", r#"{"action":"deny"}"#);
+        assert_parses("Reach, no", r#"{"action":"deny"}"#);
+        assert_parses("rich no", r#"{"action":"deny"}"#);
+        assert_parses("no reach", r#"{"action":"deny"}"#);
     }
 
     /// Cancel and undo are separate from deny.

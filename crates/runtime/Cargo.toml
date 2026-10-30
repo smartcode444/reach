@@ -6,10 +6,15 @@ description = "Shared voice-loop orchestration for Reach"
 publish = false
 
 [dependencies]
+audio = { version = "0.1.0", path = "../audio" }
 exec = { version = "0.1.0", path = "../exec" }
 nlu = { version = "0.1.0", path = "../nlu" }
 reach-core = { version = "0.1.0", path = "../core" }
 screen = { version = "0.1.0", path = "../screen" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+stt = { version = "0.1.0", path = "../stt" }
+toml = "0.8"
 
 [lints]
 workspace = true

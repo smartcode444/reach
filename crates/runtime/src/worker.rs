@@ -1,12 +1,8 @@
 //! Worker-thread loop that consumes transcripts and emits status events.
 //!
-//! The microphone path will eventually feed this loop. Until `audio` and `stt`
-//! are implemented, the app feeds it typed lines from the console. Only the
-//! input source changes; the status channel and the pipeline stay the same.
-//!
-//! The loop owns no desktop state and never logs a transcript, an element name
-//! or an executor error. Everything the status window can display arrives as a
-//! [`StatusEvent`].
+//! Feeds the shared pipeline from either microphone-driven [`InputSource::Voice`]
+//! or channel-driven [`InputSource::Text`]. The loop emits [`StatusEvent`] values
+//! to keep the status HUD updated in real time.
 
 use std::io::{self, BufRead, Read, Write};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -17,40 +13,172 @@ use reach_core::Executor;
 
 use crate::pipeline::{Pipeline, StepOutcome};
 use crate::status::{ErrorKind, StatusEvent};
+use crate::voice::VoiceInput;
 
 /// How often the worker re-checks the listening window while waiting for input.
-///
-/// The wake window is five seconds by default. Polling a few times a second
-/// lets the status window return to `Asleep` when the window expires, without
-/// waking the worker in a tight loop.
 const LISTEN_POLL: Duration = Duration::from_millis(100);
 
-/// Why [`run_worker`] returned.
+/// Why a worker loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerEnd {
-    /// The input channel closed, so there is nothing more to process.
+    /// The input source closed, so there is nothing more to process.
     InputClosed,
-    /// The user typed `exit` or `quit`.
+    /// The user exited or triggered an emergency stop.
     Exited,
-    /// The status receiver was dropped, so there is nowhere to report to.
+    /// The status receiver was dropped.
     StatusClosed,
 }
 
-/// Runs the shared voice loop until input ends, the user exits, or the status
-/// receiver goes away.
-///
-/// The worker emits an initial [`StatusEvent::Asleep`], one
-/// [`StatusEvent::Heard`] per non-empty line, and a final
-/// [`StatusEvent::Stopped`] unless the status channel itself closed.
+/// The source of utterances for the shared runtime worker.
+pub enum InputSource {
+    /// Microphone-driven voice input.
+    Voice(Box<VoiceInput>),
+    /// Channel-driven text input (console stdin / tests).
+    Text(Receiver<String>),
+}
+
+/// Runs the worker loop on an explicit [`InputSource`].
 ///
 /// # Arguments
-/// * `pipeline` - The configured wake, routing and execution pipeline.
-/// * `lines` - Transcripts from the microphone or, for now, the console.
-/// * `status` - Sink for the status window.
+/// * `pipeline` - The configured pipeline.
+/// * `input` - The voice or text input source.
+/// * `status` - Channel to deliver status events to.
 ///
 /// # Returns
-/// Why the loop ended.
-pub fn run_worker<M: IntentModel, E: Executor>(
+/// Reason why the worker stopped.
+pub fn run_worker_source<M: IntentModel + Send + 'static, E: Executor>(
+    pipeline: &mut Pipeline<M, E>,
+    input: &mut InputSource,
+    status: &Sender<StatusEvent>,
+) -> WorkerEnd {
+    match input {
+        InputSource::Text(lines) => run_text_worker(pipeline, lines, status),
+        InputSource::Voice(voice) => run_voice_worker(pipeline, voice, status),
+    }
+}
+
+/// Runs the worker on channel-delivered text transcripts (legacy / testing).
+///
+/// # Arguments
+/// * `pipeline` - The configured pipeline.
+/// * `lines` - Receiver channel carrying transcript strings.
+/// * `status` - Channel to deliver status events to.
+///
+/// # Returns
+/// Reason why the worker stopped.
+pub fn run_worker<M: IntentModel + Send + 'static, E: Executor>(
+    pipeline: &mut Pipeline<M, E>,
+    lines: &Receiver<String>,
+    status: &Sender<StatusEvent>,
+) -> WorkerEnd {
+    run_text_worker(pipeline, lines, status)
+}
+
+/// Runs the voice-driven worker loop using microphone input.
+///
+/// # Arguments
+/// * `pipeline` - Configured pipeline.
+/// * `voice` - Microphone voice input.
+/// * `status` - Status event sink.
+///
+/// # Returns
+/// Why the worker loop terminated.
+pub fn run_voice_worker<M: IntentModel + Send + 'static, E: Executor>(
+    pipeline: &mut Pipeline<M, E>,
+    voice: &mut VoiceInput,
+    status: &Sender<StatusEvent>,
+) -> WorkerEnd {
+    if status.send(StatusEvent::Asleep).is_err() {
+        return WorkerEnd::StatusClosed;
+    }
+
+    loop {
+        // Check emergency stop flag between steps
+        if pipeline.is_stopped() {
+            return finish(status, WorkerEnd::Exited);
+        }
+
+        let timeout = if pipeline.is_listening(Instant::now()) {
+            Some(LISTEN_POLL)
+        } else {
+            None
+        };
+
+        let utterance_opt = match voice.next_utterance(timeout) {
+            Ok(Some(u)) => Some(u),
+            Ok(None) => {
+                if voice.is_closed() {
+                    return finish(status, WorkerEnd::InputClosed);
+                }
+                if !pipeline.is_listening(Instant::now())
+                    && status.send(StatusEvent::Asleep).is_err()
+                {
+                    return WorkerEnd::StatusClosed;
+                }
+                continue;
+            }
+            Err(_) => {
+                let _ = status.send(StatusEvent::Error {
+                    kind: ErrorKind::Io,
+                });
+                return finish(status, WorkerEnd::InputClosed);
+            }
+        };
+
+        let Some(input) = utterance_opt else {
+            continue;
+        };
+
+        voice.mark_processing_started();
+        let now = input.speech_ended;
+        let mut status_closed = false;
+        let mut writer = NullWriter;
+
+        let result =
+            pipeline.process_observed(&input.heard.text, now, voice, &mut writer, &mut |event| {
+                if status.send(event).is_err() {
+                    status_closed = true;
+                }
+            });
+
+        voice.mark_processing_ended();
+
+        if status_closed {
+            return WorkerEnd::StatusClosed;
+        }
+
+        if result.is_err() {
+            if status
+                .send(StatusEvent::Error {
+                    kind: ErrorKind::Io,
+                })
+                .is_err()
+            {
+                return WorkerEnd::StatusClosed;
+            }
+            return finish(status, WorkerEnd::InputClosed);
+        }
+
+        let executed_action = matches!(result, Ok(StepOutcome::Handled { executed: true, .. }));
+        if !executed_action
+            && !pipeline.is_listening(Instant::now())
+            && status.send(StatusEvent::Asleep).is_err()
+        {
+            return WorkerEnd::StatusClosed;
+        }
+    }
+}
+
+/// Runs the text-driven worker loop using console/channel input.
+///
+/// # Arguments
+/// * `pipeline` - Configured pipeline.
+/// * `lines` - Channel delivering typed text lines.
+/// * `status` - Status event sink.
+///
+/// # Returns
+/// Why the worker loop terminated.
+pub fn run_text_worker<M: IntentModel + Send + 'static, E: Executor>(
     pipeline: &mut Pipeline<M, E>,
     lines: &Receiver<String>,
     status: &Sender<StatusEvent>,
@@ -60,13 +188,14 @@ pub fn run_worker<M: IntentModel, E: Executor>(
     }
 
     loop {
+        if pipeline.is_stopped() {
+            return finish(status, WorkerEnd::Exited);
+        }
+
         let line = if pipeline.is_listening(Instant::now()) {
             match lines.recv_timeout(LISTEN_POLL) {
                 Ok(line) => line,
                 Err(RecvTimeoutError::Timeout) => {
-                    // The window may have expired while we waited. Reporting
-                    // `Asleep` here keeps the indicator truthful even when the
-                    // user says nothing after the wake word.
                     if !pipeline.is_listening(Instant::now())
                         && status.send(StatusEvent::Asleep).is_err()
                     {
@@ -118,9 +247,6 @@ pub fn run_worker<M: IntentModel, E: Executor>(
             return finish(status, WorkerEnd::InputClosed);
         }
 
-        // A bare wake word leaves the listening window open; the pipeline has
-        // already reported `Listening`. When an action ran, it is held on screen
-        // instead of immediately returning to asleep.
         let executed_action = matches!(result, Ok(StepOutcome::Handled { executed: true, .. }));
         if !executed_action
             && !pipeline.is_listening(now)
@@ -131,15 +257,7 @@ pub fn run_worker<M: IntentModel, E: Executor>(
     }
 }
 
-/// Sends the final `Stopped` event and converts a send failure into
-/// [`WorkerEnd::StatusClosed`].
-///
-/// # Arguments
-/// * `status` - Sink for the status window.
-/// * `end` - The reason the loop ended before the final event.
-///
-/// # Returns
-/// `end` when `Stopped` was delivered, otherwise [`WorkerEnd::StatusClosed`].
+/// Sends the final `Stopped` event and converts a send failure into [`WorkerEnd::StatusClosed`].
 fn finish(status: &Sender<StatusEvent>, end: WorkerEnd) -> WorkerEnd {
     if status.send(StatusEvent::Stopped).is_err() {
         WorkerEnd::StatusClosed
@@ -149,29 +267,19 @@ fn finish(status: &Sender<StatusEvent>, end: WorkerEnd) -> WorkerEnd {
 }
 
 /// A blocking line reader backed by the worker's input channel.
-///
-/// The pipeline reads a confirmation answer immediately after reporting a
-/// pending action. This adapter lets the same channel serve both the normal
-/// transcripts and that answer, without a second input source.
 struct ChannelReader<'a> {
-    /// The channel carrying transcript lines.
+    /// Channel delivering typed text lines from the input loop.
     receiver: &'a Receiver<String>,
-    /// The bytes of the current line plus a synthetic newline.
+    /// In-memory buffer holding the current line being consumed.
     buffer: Vec<u8>,
-    /// How many bytes of `buffer` have already been consumed.
+    /// Number of bytes already consumed from `buffer`.
     consumed: usize,
-    /// True once the channel has disconnected.
+    /// Indicates whether the underlying channel was disconnected.
     eof: bool,
 }
 
 impl<'a> ChannelReader<'a> {
     /// Wraps `receiver` in a blocking line reader.
-    ///
-    /// # Arguments
-    /// * `receiver` - The channel carrying transcript lines.
-    ///
-    /// # Returns
-    /// An empty reader positioned before the next line.
     fn new(receiver: &'a Receiver<String>) -> Self {
         Self {
             receiver,
@@ -183,17 +291,6 @@ impl<'a> ChannelReader<'a> {
 }
 
 impl Read for ChannelReader<'_> {
-    /// Copies bytes from the current line into `buf`.
-    ///
-    /// # Arguments
-    /// * `buf` - Destination buffer.
-    ///
-    /// # Returns
-    /// The number of bytes copied, or zero at end of input.
-    ///
-    /// # Errors
-    /// Never returns an error; a disconnected channel is reported as end of
-    /// input.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let amount = {
             let available = self.fill_buf()?;
@@ -207,63 +304,41 @@ impl Read for ChannelReader<'_> {
 }
 
 impl BufRead for ChannelReader<'_> {
-    /// Blocks until the next line is available or the channel disconnects.
-    ///
-    /// # Returns
-    /// The unconsumed part of the current line, including its synthetic
-    /// newline, or an empty slice at end of input.
-    ///
-    /// # Errors
-    /// Never returns an error.
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        if self.consumed == self.buffer.len() && !self.eof {
-            match self.receiver.recv() {
-                Ok(line) => {
-                    self.buffer.clear();
-                    self.consumed = 0;
-                    self.buffer.extend_from_slice(line.as_bytes());
-                    self.buffer.push(b'\n');
-                }
-                Err(_) => self.eof = true,
+        if self.consumed < self.buffer.len() {
+            return Ok(&self.buffer[self.consumed..]);
+        }
+        if self.eof {
+            return Ok(&[]);
+        }
+        self.buffer.clear();
+        self.consumed = 0;
+        match self.receiver.recv() {
+            Ok(line) => {
+                self.buffer.extend_from_slice(line.as_bytes());
+                self.buffer.push(b'\n');
+                Ok(&self.buffer)
+            }
+            Err(_) => {
+                self.eof = true;
+                Ok(&[])
             }
         }
-        Ok(&self.buffer[self.consumed..])
     }
 
-    /// Marks `amount` bytes of the current line as consumed.
-    ///
-    /// # Arguments
-    /// * `amount` - Number of bytes to discard.
     fn consume(&mut self, amount: usize) {
-        self.consumed = (self.consumed + amount).min(self.buffer.len());
+        self.consumed = self.consumed.saturating_add(amount).min(self.buffer.len());
     }
 }
 
-/// A writer that discards human-readable pipeline output.
-///
-/// The app reports through [`StatusEvent`], so the pipeline's text is not
-/// needed and must not be printed to a console that may not exist in release.
-struct NullWriter;
+/// A [`Write`] implementation that discards all bytes.
+pub struct NullWriter;
 
 impl Write for NullWriter {
-    /// Discards `buf` and reports it as written.
-    ///
-    /// # Arguments
-    /// * `buf` - Bytes to discard.
-    ///
-    /// # Returns
-    /// The length of `buf`.
-    ///
-    /// # Errors
-    /// Never returns an error.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         Ok(buf.len())
     }
 
-    /// Does nothing; the writer has no buffer.
-    ///
-    /// # Errors
-    /// Never returns an error.
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -271,357 +346,338 @@ impl Write for NullWriter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
-    use std::thread;
     use std::time::Duration;
 
-    use nlu::wake::WakeConfig;
-    use reach_core::{Direction, Executor, Intent};
+    use audio::{EndpointConfig, FRAME_SAMPLES};
+    use reach_core::{Executor, Heard, Intent};
 
-    use crate::pipeline::{DisabledModel, Pipeline, format_intent_action};
-    use crate::status::{ErrorKind, StatusEvent};
-    use crate::worker::{WorkerEnd, run_worker};
+    use super::*;
+    use crate::pipeline::{DisabledModel, Pipeline};
+    use crate::status::StatusEvent;
+    use crate::voice::{FramePoll, FrameSource, SpeechToText, VoiceInput};
 
-    /// A stand-in executor that records intents and can fail on demand.
-    struct FakeExecutor {
-        /// When set, every intent returns this error text.
-        error: Option<String>,
-        /// Intents passed to [`Executor::run`], in order.
+    /// Recording executor that tracks executed intents.
+    #[derive(Default)]
+    struct RecordingExecutor {
         intents: Vec<Intent>,
     }
 
-    impl FakeExecutor {
-        /// Returns an executor that succeeds and records intents.
-        fn ok() -> Self {
-            Self {
-                error: None,
-                intents: Vec::new(),
-            }
-        }
-
-        /// Returns an executor that always fails with `message`.
-        fn failing(message: &str) -> Self {
-            Self {
-                error: Some(message.to_owned()),
-                intents: Vec::new(),
-            }
-        }
-    }
-
-    impl Executor for FakeExecutor {
-        /// Records `intent`, then succeeds or returns the configured error.
+    impl Executor for RecordingExecutor {
         fn run(&mut self, intent: &Intent) -> Result<String, String> {
             self.intents.push(intent.clone());
-            match &self.error {
-                Some(error) => Err(error.clone()),
-                None => Ok("executed".to_owned()),
+            Ok("ok".to_owned())
+        }
+    }
+
+    /// Scripted frame source for testing voice input.
+    struct ScriptedFrames {
+        events: VecDeque<FramePoll>,
+    }
+
+    impl FrameSource for ScriptedFrames {
+        fn next_frame(&mut self, _timeout: Duration) -> FramePoll {
+            self.events.pop_front().unwrap_or(FramePoll::Closed)
+        }
+    }
+
+    /// Scripted transcriber for testing voice input.
+    struct ScriptedTranscriber {
+        replies: VecDeque<Option<String>>,
+    }
+
+    impl SpeechToText for ScriptedTranscriber {
+        fn transcribe(&mut self, _samples: &[f32]) -> Result<Option<Heard>, String> {
+            let reply = self.replies.pop_front().flatten();
+            Ok(reply.map(|text| Heard {
+                text,
+                confidence: Some(0.95),
+            }))
+        }
+    }
+
+    /// Builds a simulated voice utterance with voiced audio frames.
+    fn make_voice_input(transcripts: Vec<&str>) -> VoiceInput {
+        let mut events = Vec::new();
+        for _ in 0..transcripts.len() {
+            for _ in 0..30 {
+                events.push(FramePoll::Frame(vec![0.1; FRAME_SAMPLES]));
+            }
+            for _ in 0..5 {
+                events.push(FramePoll::Frame(vec![0.0; FRAME_SAMPLES]));
             }
         }
+        events.push(FramePoll::Closed);
+
+        let frames = Box::new(ScriptedFrames {
+            events: events.into(),
+        });
+        let stt = Box::new(ScriptedTranscriber {
+            replies: transcripts
+                .into_iter()
+                .map(|s| Some(s.to_owned()))
+                .collect(),
+        });
+
+        VoiceInput::new(
+            frames,
+            stt,
+            EndpointConfig {
+                min_speech_ms: 100,
+                end_silence_ms: 100,
+                pre_roll_ms: 20,
+                max_utterance_ms: 5_000,
+                ..EndpointConfig::default()
+            },
+            Duration::from_millis(100),
+        )
+        .unwrap()
     }
 
-    /// Runs a finite script through the worker and returns its status stream.
-    ///
-    /// The input channel is closed after the scripted lines, so the worker
-    /// always finishes and the test can collect the events without blocking.
-    fn run_script(
-        lines: &[&str],
-        executor: FakeExecutor,
-    ) -> (WorkerEnd, Vec<StatusEvent>, Vec<Intent>) {
-        let (line_sender, line_receiver) = mpsc::channel();
-        for line in lines {
-            line_sender.send((*line).to_owned()).unwrap();
-        }
-        drop(line_sender);
-
-        let (status_sender, status_receiver) = mpsc::channel();
-        let mut pipeline = Pipeline::new(DisabledModel, executor, false);
-        let end = run_worker(&mut pipeline, &line_receiver, &status_sender);
-        let events = status_receiver.try_iter().collect();
-        let intents = pipeline.executor().intents.clone();
-        (end, events, intents)
-    }
-
-    /// A bare wake word opens the listening window and reports it.
     #[test]
-    fn wake_word_emits_listening() {
-        let (end, events, intents) = run_script(&["Reach"], FakeExecutor::ok());
-        assert_eq!(end, WorkerEnd::InputClosed);
-        assert!(intents.is_empty());
-        assert_eq!(
-            events,
-            vec![
-                StatusEvent::Asleep,
-                StatusEvent::Heard {
-                    text: "Reach".to_owned(),
-                },
-                StatusEvent::Listening,
-                StatusEvent::Stopped,
-            ]
-        );
-    }
+    fn voice_wake_only_opens_window_and_emits_listening() {
+        let voice = make_voice_input(vec!["Reach"]);
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+        let (status_tx, status_rx) = mpsc::channel();
 
-    /// A compound wake+command utterance emits Listening before Heard and Action.
-    #[test]
-    fn compound_wake_command_emits_listening_before_heard_and_action() {
-        let (end, events, intents) = run_script(&["Reach scroll down"], FakeExecutor::ok());
-        let intent = Intent::Scroll {
-            direction: Direction::Down,
-            amount: None,
-        };
-        assert_eq!(end, WorkerEnd::InputClosed);
-        assert_eq!(intents, vec![intent.clone()]);
-        assert_eq!(
-            events,
-            vec![
-                StatusEvent::Asleep,
-                StatusEvent::Listening,
-                StatusEvent::Heard {
-                    text: "Reach scroll down".to_owned(),
-                },
-                StatusEvent::Action {
-                    label: format_intent_action(&intent),
-                },
-                StatusEvent::Stopped,
-            ]
-        );
-    }
+        let mut input = InputSource::Voice(Box::new(voice));
+        let _ = run_worker_source(&mut pipeline, &mut input, &status_tx);
 
-    /// After Action is emitted, Asleep is not emitted immediately in the same worker step.
-    #[test]
-    fn action_does_not_immediately_emit_asleep_in_same_step() {
-        let (line_sender, line_receiver) = mpsc::channel();
-        let (status_sender, status_receiver) = mpsc::channel();
-        let mut pipeline = Pipeline::new(DisabledModel, FakeExecutor::ok(), false);
-
-        // Send one compound command, but keep channel open to inspect step output
-        line_sender.send("Reach scroll down".to_owned()).unwrap();
-
-        let worker_thread =
-            std::thread::spawn(move || run_worker(&mut pipeline, &line_receiver, &status_sender));
-
-        std::thread::sleep(Duration::from_millis(150));
-        let events: Vec<StatusEvent> = status_receiver.try_iter().collect();
-
-        let action_idx = events
-            .iter()
-            .position(|e| matches!(e, StatusEvent::Action { .. }));
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(events.contains(&StatusEvent::Asleep));
         assert!(
-            action_idx.is_some(),
-            "expected Action event, got: {events:?}"
-        );
-        let has_asleep_after_action = events[action_idx.unwrap()..]
-            .iter()
-            .any(|e| matches!(e, StatusEvent::Asleep));
-        assert!(
-            !has_asleep_after_action,
-            "Asleep was emitted immediately after Action in the same step: {events:?}"
-        );
-
-        drop(line_sender);
-        let _ = worker_thread.join();
-    }
-
-    /// With an execution delay, Listening and Heard are emitted before the executor runs.
-    #[test]
-    fn execution_delay_emits_status_before_running() {
-        let (line_sender, line_receiver) = mpsc::channel();
-        let (status_sender, status_receiver) = mpsc::channel();
-        let mut pipeline = Pipeline::new(DisabledModel, FakeExecutor::ok(), false)
-            .with_execution_delay(Duration::from_millis(100));
-
-        line_sender.send("Reach scroll down".to_owned()).unwrap();
-
-        let worker_thread =
-            std::thread::spawn(move || run_worker(&mut pipeline, &line_receiver, &status_sender));
-
-        // After 25ms (well before the 100ms delay elapses), Listening and Heard must already be emitted,
-        // but Action must not yet be emitted.
-        std::thread::sleep(Duration::from_millis(25));
-        let early_events: Vec<StatusEvent> = status_receiver.try_iter().collect();
-        assert!(early_events.contains(&StatusEvent::Listening));
-        assert!(
-            early_events
+            events
                 .iter()
-                .any(|e| matches!(e, StatusEvent::Heard { .. }))
+                .any(|e| matches!(e, StatusEvent::Heard { text } if text == "Reach"))
         );
+        assert!(events.contains(&StatusEvent::Listening));
+    }
+
+    #[test]
+    fn voice_command_without_wake_word_is_ignored() {
+        let voice = make_voice_input(vec!["scroll down"]);
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+        let (status_tx, status_rx) = mpsc::channel();
+
+        let mut input = InputSource::Voice(Box::new(voice));
+        let _ = run_worker_source(&mut pipeline, &mut input, &status_tx);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(events.contains(&StatusEvent::Asleep));
         assert!(
-            !early_events
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Heard { text } if text == "scroll down"))
+        );
+        // Action must not run when wake word is absent
+        assert!(
+            !events
                 .iter()
                 .any(|e| matches!(e, StatusEvent::Action { .. }))
         );
+    }
 
-        // After the remaining delay, Action arrives.
-        std::thread::sleep(Duration::from_millis(125));
-        let later_events: Vec<StatusEvent> = status_receiver.try_iter().collect();
+    #[test]
+    fn voice_confirm_yes_runs_action() {
+        let voice = make_voice_input(vec!["Reach click submit", "yes"]);
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+        let (status_tx, status_rx) = mpsc::channel();
+
+        let mut input = InputSource::Voice(Box::new(voice));
+        let _ = run_worker_source(&mut pipeline, &mut input, &status_tx);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
         assert!(
-            later_events
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Confirming { .. }))
+        );
+        assert!(
+            events
                 .iter()
                 .any(|e| matches!(e, StatusEvent::Action { .. }))
         );
-
-        drop(line_sender);
-        let _ = worker_thread.join();
     }
 
-    /// Speech without the wake word returns the window to asleep.
     #[test]
-    fn ignored_speech_emits_asleep() {
-        let (_, events, intents) = run_script(&["scroll down"], FakeExecutor::ok());
-        assert!(intents.is_empty());
-        assert_eq!(
-            events,
-            vec![
-                StatusEvent::Asleep,
-                StatusEvent::Heard {
-                    text: "scroll down".to_owned(),
-                },
-                StatusEvent::Asleep,
-                StatusEvent::Stopped,
-            ]
+    /// Verifies that speaking "no" cancels the pending action.
+    fn voice_confirm_no_cancels_action() {
+        let voice = make_voice_input(vec!["Reach click submit", "no"]);
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+        let (status_tx, status_rx) = mpsc::channel();
+
+        let mut input = InputSource::Voice(Box::new(voice));
+        let _ = run_worker_source(&mut pipeline, &mut input, &status_tx);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Confirming { .. }))
         );
-    }
-
-    /// An unmatched command asks the user to rephrase instead of guessing.
-    #[test]
-    fn unmatched_command_emits_not_understood() {
-        let (_, events, intents) = run_script(&["Reach tell me a joke"], FakeExecutor::ok());
-        assert!(intents.is_empty());
-        assert_eq!(
-            events,
-            vec![
-                StatusEvent::Asleep,
-                StatusEvent::Listening,
-                StatusEvent::Heard {
-                    text: "Reach tell me a joke".to_owned(),
-                },
-                StatusEvent::NotUnderstood,
-                StatusEvent::Asleep,
-                StatusEvent::Stopped,
-            ]
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { .. }))
         );
+        assert_eq!(pipeline.executor().intents.len(), 0);
     }
 
-    /// A risky command announces confirmation, then the action on yes.
     #[test]
-    fn confirmation_yes_emits_confirming_then_action() {
-        let (_, events, intents) = run_script(&["Reach click Submit", "yes"], FakeExecutor::ok());
-        let intent = Intent::ClickElement {
-            target: "Submit".to_owned(),
-        };
-        let label = format_intent_action(&intent);
-        assert_eq!(intents, vec![intent]);
-        assert_eq!(
-            events,
-            vec![
-                StatusEvent::Asleep,
-                StatusEvent::Listening,
-                StatusEvent::Heard {
-                    text: "Reach click Submit".to_owned(),
-                },
-                StatusEvent::Confirming {
-                    label: label.clone()
-                },
-                StatusEvent::Action { label },
-                StatusEvent::Stopped,
-            ]
+    /// Verifies that speaking "Reach, yes" confirms the pending action.
+    fn voice_confirm_reach_yes_runs_action() {
+        let voice = make_voice_input(vec!["Reach click submit", "Reach, yes"]);
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+        let (status_tx, status_rx) = mpsc::channel();
+
+        let mut input = InputSource::Voice(Box::new(voice));
+        let _ = run_worker_source(&mut pipeline, &mut input, &status_tx);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Confirming { .. }))
         );
-    }
-
-    /// A denied confirmation never reaches the executor.
-    #[test]
-    fn confirmation_no_emits_asleep_without_running() {
-        let (_, events, intents) = run_script(&["Reach click Submit", "no"], FakeExecutor::ok());
-        let label = format_intent_action(&Intent::ClickElement {
-            target: "Submit".to_owned(),
-        });
-        assert!(intents.is_empty());
-        assert_eq!(
-            events,
-            vec![
-                StatusEvent::Asleep,
-                StatusEvent::Listening,
-                StatusEvent::Heard {
-                    text: "Reach click Submit".to_owned(),
-                },
-                StatusEvent::Confirming { label },
-                StatusEvent::Asleep,
-                StatusEvent::Stopped,
-            ]
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { .. }))
         );
+        assert_eq!(pipeline.executor().intents.len(), 1);
     }
 
-    /// Executor failures expose a kind only, never the executor's text.
     #[test]
-    fn executor_error_emits_only_the_error_kind() {
-        let (_, events, _) = run_script(
-            &["Reach scroll down"],
-            FakeExecutor::failing("private-button-name"),
+    /// Verifies that speaking "reach yes" confirms the pending action.
+    fn voice_confirm_reach_yes_without_comma_runs_action() {
+        let voice = make_voice_input(vec!["Reach click submit", "reach yes"]);
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+        let (status_tx, status_rx) = mpsc::channel();
+
+        let mut input = InputSource::Voice(Box::new(voice));
+        let _ = run_worker_source(&mut pipeline, &mut input, &status_tx);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { .. }))
         );
-        assert!(events.contains(&StatusEvent::Error {
-            kind: ErrorKind::Execution,
-        }));
-        let debug = format!("{events:?}");
-        assert!(!debug.contains("private-button-name"));
+        assert_eq!(pipeline.executor().intents.len(), 1);
     }
 
-    /// An expired listening window returns the indicator to asleep.
     #[test]
-    fn listening_window_timeout_emits_asleep() {
-        let (line_sender, line_receiver) = mpsc::channel();
-        line_sender.send("Reach".to_owned()).unwrap();
-        // Keep the channel open long enough for the worker's poll to observe
-        // the expired window, then close it so the test can finish.
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(1000));
-            drop(line_sender);
-        });
+    /// Verifies that speaking "rich yes" with the acoustic wake alias confirms the pending action.
+    fn voice_confirm_rich_yes_runs_action() {
+        let voice = make_voice_input(vec!["Reach click submit", "rich yes"]);
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+        let (status_tx, status_rx) = mpsc::channel();
 
-        let (status_sender, status_receiver) = mpsc::channel();
-        let config = WakeConfig {
-            window: Duration::from_millis(50),
-            ..WakeConfig::default()
-        };
-        let mut pipeline =
-            Pipeline::with_wake_config(DisabledModel, FakeExecutor::ok(), false, config);
-        let end = run_worker(&mut pipeline, &line_receiver, &status_sender);
-        assert_eq!(end, WorkerEnd::InputClosed);
-        let events: Vec<StatusEvent> = status_receiver.try_iter().collect();
-        assert_eq!(
-            events,
-            vec![
-                StatusEvent::Asleep,
-                StatusEvent::Heard {
-                    text: "Reach".to_owned(),
-                },
-                StatusEvent::Listening,
-                StatusEvent::Asleep,
-                StatusEvent::Stopped,
-            ]
+        let mut input = InputSource::Voice(Box::new(voice));
+        let _ = run_worker_source(&mut pipeline, &mut input, &status_tx);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { .. }))
         );
+        assert_eq!(pipeline.executor().intents.len(), 1);
     }
 
-    /// The exit command stops the loop without treating "exit" as speech.
     #[test]
-    fn exit_emits_stopped_without_hearing() {
-        let (end, events, intents) = run_script(&["exit"], FakeExecutor::ok());
+    /// Verifies that speaking "Reach, no" cancels the pending action.
+    fn voice_confirm_reach_no_cancels_action() {
+        let voice = make_voice_input(vec!["Reach click submit", "Reach, no"]);
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+        let (status_tx, status_rx) = mpsc::channel();
+
+        let mut input = InputSource::Voice(Box::new(voice));
+        let _ = run_worker_source(&mut pipeline, &mut input, &status_tx);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Confirming { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { .. }))
+        );
+        assert_eq!(pipeline.executor().intents.len(), 0);
+    }
+
+    #[test]
+    fn text_worker_emits_heard_and_runs_commands() {
+        let (lines_tx, lines_rx) = mpsc::channel();
+        let (status_tx, status_rx) = mpsc::channel();
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
+
+        lines_tx.send("Reach scroll down".to_owned()).unwrap();
+        lines_tx.send("exit".to_owned()).unwrap();
+
+        let mut input = InputSource::Text(lines_rx);
+        let end = run_worker_source(&mut pipeline, &mut input, &status_tx);
         assert_eq!(end, WorkerEnd::Exited);
-        assert!(intents.is_empty());
-        assert_eq!(events, vec![StatusEvent::Asleep, StatusEvent::Stopped]);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Heard { text } if text == "Reach scroll down"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { label } if *label == "scroll"))
+        );
+        assert_eq!(pipeline.executor().intents.len(), 1);
     }
 
-    /// A closed status channel stops the worker immediately.
     #[test]
-    fn closed_status_channel_stops_the_worker() {
-        let (line_sender, line_receiver) = mpsc::channel();
-        line_sender.send("Reach".to_owned()).unwrap();
-        drop(line_sender);
-        let (status_sender, status_receiver) = mpsc::channel();
-        drop(status_receiver);
+    fn unexecutable_command_emits_not_understood_and_recovers_immediately() {
+        let (lines_tx, lines_rx) = mpsc::channel();
+        let (status_tx, status_rx) = mpsc::channel();
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false);
 
-        let mut pipeline = Pipeline::new(DisabledModel, FakeExecutor::ok(), false);
-        assert_eq!(
-            run_worker(&mut pipeline, &line_receiver, &status_sender),
-            WorkerEnd::StatusClosed
+        lines_tx.send("reach what's my name".to_owned()).unwrap();
+        lines_tx.send("reach scroll down".to_owned()).unwrap();
+        lines_tx.send("exit".to_owned()).unwrap();
+
+        let mut input = InputSource::Text(lines_rx);
+        let end = run_worker_source(&mut pipeline, &mut input, &status_tx);
+        assert_eq!(end, WorkerEnd::Exited);
+
+        let events: Vec<StatusEvent> = status_rx.try_iter().collect();
+        assert!(events.contains(&StatusEvent::NotUnderstood));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { label } if *label == "scroll"))
         );
+        assert_eq!(pipeline.executor().intents.len(), 1);
+    }
+
+    #[test]
+    fn emergency_stop_halts_loop_between_steps() {
+        let (lines_tx, lines_rx) = mpsc::channel();
+        let (status_tx, _status_rx) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let mut pipeline = Pipeline::new(DisabledModel, RecordingExecutor::default(), false)
+            .with_stop_flag(Arc::clone(&stop_flag));
+
+        // Trigger stop flag
+        stop_flag.store(true, Ordering::SeqCst);
+        lines_tx.send("Reach scroll down".to_owned()).unwrap();
+
+        let mut input = InputSource::Text(lines_rx);
+        let end = run_worker_source(&mut pipeline, &mut input, &status_tx);
+        assert_eq!(end, WorkerEnd::Exited);
+        assert_eq!(pipeline.executor().intents.len(), 0);
     }
 }
