@@ -26,7 +26,8 @@ use std::thread;
 use std::time::Duration;
 
 use reach_runtime::{
-    CompositeExecutor, ErrorKind, Pipeline, PipelineModel, StatusEvent, run_worker,
+    CompositeExecutor, ErrorKind, OverlayEvent, Pipeline, PipelineModel, Rect, StatusEvent,
+    run_worker,
 };
 use serde::Serialize;
 use tauri::{Emitter, Manager, PhysicalPosition, WebviewWindow};
@@ -45,6 +46,9 @@ const TYPED_COMMAND_DELAY: Duration = Duration::from_secs(3);
 
 /// The event name the status window listens for.
 const STATUS_EVENT: &str = "reach-status";
+
+/// The event name the overlay window listens for.
+const OVERLAY_EVENT: &str = "reach-overlay";
 
 /// How many recent status envelopes are kept for a late-loading front end.
 const STATUS_HISTORY: usize = 8;
@@ -66,11 +70,12 @@ fn main() {
 /// `Ok(())` after the Tauri event loop exits.
 ///
 /// # Errors
-/// Returns a message when the status window is missing, click-through cannot
+/// Returns a message when the status or overlay window is missing, click-through cannot
 /// be enabled, or Tauri fails to start.
 fn run() -> Result<(), String> {
     let (line_sender, line_receiver) = mpsc::channel::<String>();
     let (status_sender, status_receiver) = mpsc::channel::<StatusEvent>();
+    let (overlay_sender, overlay_receiver) = mpsc::channel::<OverlayEvent>();
     let history = Arc::new(Mutex::new(StatusHistory::new()));
 
     tauri::Builder::default()
@@ -88,10 +93,18 @@ fn run() -> Result<(), String> {
                 .show()
                 .map_err(|error| format!("show failed: {error}"))?;
 
-            // The forwarder starts before the worker so the initial `Asleep`
-            // and any startup error reach the window.
+            let overlay = app
+                .get_webview_window("overlay")
+                .ok_or_else(|| "overlay window was not created".to_owned())?;
+            overlay
+                .set_ignore_cursor_events(true)
+                .map_err(|error| format!("overlay click-through failed: {error}"))?;
+            place_overlay(&overlay)?;
+
+            // The forwarders start before the worker so events reach the windows.
             spawn_status_forwarder(window, status_receiver, history);
-            spawn_worker(line_receiver, status_sender);
+            spawn_overlay_forwarder(overlay, overlay_receiver);
+            spawn_worker(line_receiver, status_sender, overlay_sender);
             spawn_console_reader(line_sender);
             Ok(())
         })
@@ -274,7 +287,12 @@ fn load_model() -> Result<PipelineModel, ErrorKind> {
 /// # Arguments
 /// * `lines` - Transcripts from the console until audio/STT land.
 /// * `status` - Sink for status events.
-fn spawn_worker(lines: Receiver<String>, status: Sender<StatusEvent>) {
+/// * `overlay` - Sink for overlay visual events.
+fn spawn_worker(
+    lines: Receiver<String>,
+    status: Sender<StatusEvent>,
+    overlay: Sender<OverlayEvent>,
+) {
     thread::spawn(move || {
         let model = match load_model() {
             Ok(model) => model,
@@ -285,7 +303,7 @@ fn spawn_worker(lines: Receiver<String>, status: Sender<StatusEvent>) {
             }
         };
         let executor = match CompositeExecutor::new() {
-            Ok(executor) => executor,
+            Ok(executor) => executor.with_overlay_sender(overlay),
             Err(_) => {
                 let _ = status.send(StatusEvent::Error {
                     kind: ErrorKind::Internal,
@@ -384,4 +402,157 @@ fn place_bottom_right(window: &WebviewWindow) -> Result<(), String> {
     window
         .set_position(PhysicalPosition::new(x, y))
         .map_err(|error| format!("window position failed: {error}"))
+}
+
+/// Sizes and positions the overlay window to cover the primary monitor.
+///
+/// # Arguments
+/// * `overlay` - The overlay window to size.
+///
+/// # Returns
+/// `Ok(())` on success.
+///
+/// # Errors
+/// Returns an error message if monitor querying fails.
+fn place_overlay(overlay: &WebviewWindow) -> Result<(), String> {
+    if let Ok(Some(monitor)) = overlay.primary_monitor() {
+        let size = monitor.size();
+        let _ = overlay.set_size(*size);
+        let _ = overlay.set_position(PhysicalPosition::new(0, 0));
+    }
+    Ok(())
+}
+
+/// Forwards overlay updates from the voice loop to the transparent overlay window.
+///
+/// # Arguments
+/// * `window` - The overlay window.
+/// * `events` - Channel receiver carrying overlay commands.
+fn spawn_overlay_forwarder(window: WebviewWindow, events: Receiver<OverlayEvent>) {
+    thread::spawn(move || {
+        for event in events {
+            match event {
+                OverlayEvent::ShowNumbers(badges) => {
+                    let wire_badges = badges
+                        .into_iter()
+                        .map(|b| WireBadge {
+                            number: b.number,
+                            rect: b.rect.into(),
+                        })
+                        .collect();
+                    let payload = WireOverlayPayload::ShowNumbers {
+                        badges: wire_badges,
+                    };
+                    let _ = window.emit(OVERLAY_EVENT, payload);
+                    let _ = window.show();
+                }
+                OverlayEvent::HideNumbers => {
+                    let _ = window.emit(OVERLAY_EVENT, WireOverlayPayload::HideNumbers);
+                }
+                OverlayEvent::ShowGrid {
+                    bounds,
+                    level,
+                    cells,
+                } => {
+                    let wire_cells = cells
+                        .into_iter()
+                        .map(|(c, r)| WireCell {
+                            cell: c,
+                            rect: r.into(),
+                        })
+                        .collect();
+                    let payload = WireOverlayPayload::ShowGrid {
+                        bounds: bounds.into(),
+                        level,
+                        cells: wire_cells,
+                    };
+                    let _ = window.emit(OVERLAY_EVENT, payload);
+                    let _ = window.show();
+                }
+                OverlayEvent::HideGrid => {
+                    let _ = window.emit(OVERLAY_EVENT, WireOverlayPayload::HideGrid);
+                }
+                OverlayEvent::HideAll => {
+                    let _ = window.emit(OVERLAY_EVENT, WireOverlayPayload::Clear);
+                    let _ = window.hide();
+                }
+            }
+        }
+        let _ = window.hide();
+    });
+}
+
+/// Wire representation of a screen rectangle for the overlay front end.
+#[derive(Debug, Clone, Copy, Serialize)]
+struct WireRect {
+    /// Left horizontal coordinate.
+    left: i32,
+    /// Top vertical coordinate.
+    top: i32,
+    /// Right horizontal coordinate.
+    right: i32,
+    /// Bottom vertical coordinate.
+    bottom: i32,
+}
+
+impl From<Rect> for WireRect {
+    /// Converts a screen [`Rect`] into its serializable wire representation.
+    ///
+    /// # Arguments
+    /// * `r` - The bounding rectangle to convert.
+    ///
+    /// # Returns
+    /// An equivalent [`WireRect`].
+    fn from(r: Rect) -> Self {
+        Self {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        }
+    }
+}
+
+/// Wire representation of a numbered badge for the overlay front end.
+#[derive(Debug, Clone, Copy, Serialize)]
+struct WireBadge {
+    /// 1-based number to display.
+    number: u32,
+    /// Bounding rectangle of the target element.
+    rect: WireRect,
+}
+
+/// Wire representation of a 3x3 grid cell for the overlay front end.
+#[derive(Debug, Clone, Copy, Serialize)]
+struct WireCell {
+    /// 1-based cell index (1 to 9).
+    cell: u32,
+    /// Sub-rectangle for this cell.
+    rect: WireRect,
+}
+
+/// Wire payload sent to the overlay window over the `reach-overlay` event.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireOverlayPayload {
+    /// Display numbered badges on screen.
+    ShowNumbers {
+        /// Numbered badges to display.
+        badges: Vec<WireBadge>,
+    },
+    /// Hide numbered badges.
+    HideNumbers,
+    /// Display or update the mouse grid.
+    ShowGrid {
+        /// Overall grid bounding box.
+        bounds: WireRect,
+        /// Current zoom level.
+        level: u32,
+        /// The 9 sub-cells.
+        cells: Vec<WireCell>,
+    },
+    /// Hide the mouse grid.
+    HideGrid,
+    /// Clear all overlay visuals.
+    Clear,
 }

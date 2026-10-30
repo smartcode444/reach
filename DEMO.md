@@ -106,6 +106,20 @@ Halts all pipeline execution and resets physical/virtual input state.
 
 ---
 
+### Scenario 8: Numbered Overlay & 3x3 Mouse Grid
+Visual fallbacks when elements lack accessible names or target fine-grained canvas positions.
+
+| Step | Utterance | Expected Route | Status HUD Display | Result Description |
+|---|---|---|---|---|
+| 8.1 | `Reach show numbers` | `Route::Run` | `DONE` (Action) | Collects interactive elements and draws yellow badges with stable 1-based numbers. |
+| 8.2 | `Reach click 2` | `Route::Run` | `DONE` (Action) | Clicks element #2 from the active snapshot and clears the overlay. |
+| 8.3 | `Reach hide numbers` | `Route::Run` | `DONE` (Action) | Clears the snapshot and hides numbered badges. |
+| 8.4 | `Reach show grid` | `Route::Run` | `DONE` (Action) | Displays a 3x3 mouse grid numbered 1 to 9 over the foreground window rect. |
+| 8.5 | `Reach choose 5` | `Route::Run` | `DONE` (Action) | Zooms grid into cell 5 (level 2). |
+| 8.6 | `Reach choose 1` | `Route::Run` | `DONE` (Action) | Zooms grid into cell 1 (level 3). |
+| 8.7 | `Reach choose 9` | `Route::Run` | `DONE` (Action) | On final level, clicks cell centre at calculated coordinates and hides grid. |
+
+---
+
 ## 3. Demo Limitations
-- The 3x3 mouse grid and numbered overlays are **[not built]**.
 - Live microphone audio capture and Whisper STT are **[not built]**; typed console input is used in this demonstration.
