@@ -1,572 +1,19 @@
-//! Typed-text pipeline glue for the CLI harness.
+//! Typed-text front end for the shared voice loop.
 //!
-//! The pipeline replaces the microphone with typed input while keeping the
-//! production order: the wake session first, then [`nlu::route_utterance`],
-//! then one of the [`Route`] outcomes. It never re-implements routing and never
-//! prints the transcript.
+//! The wake, routing, confirmation and execution path lives in `reach-runtime`
+//! so the CLI and the desktop app cannot drift apart. This module keeps only
+//! what is specific to the test harness: argument parsing and the JSON output
+//! used by `--dry-run`.
 
-use std::io::{self, BufRead, Write};
-use std::time::Instant;
+use std::io::{self, Write};
 
-use nlu::tools::ToolSpec;
-use nlu::wake::{GateResult, WakeConfig, WakeSession};
-use nlu::{
-    CLARIFY_QUESTION, IntentModel, ModelError, ModelReply, NeedleIntentModel, Route,
-    route_utterance,
-};
-use reach_core::{Executor, Intent};
+use nlu::CLARIFY_QUESTION;
+use reach_runtime::pipeline::StepOutcome;
 use serde_json::{Map, Value};
 
-/// A disabled model that abstains on every utterance.
-///
-/// Used when no intent model is active; rule misses produce [`Route::Clarify`].
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DisabledModel;
-
-impl IntentModel for DisabledModel {
-    /// Returns an empty call list, signifying abstention.
-    ///
-    /// # Arguments
-    /// * `_utterance` - The recognised text (unused).
-    /// * `_tools` - The declared tool specifications (unused).
-    ///
-    /// # Returns
-    /// An empty [`ModelReply`].
-    ///
-    /// # Errors
-    /// Never returns an error.
-    fn infer(&mut self, _utterance: &str, _tools: &[ToolSpec]) -> Result<ModelReply, ModelError> {
-        Ok(ModelReply {
-            calls: Vec::new(),
-            confidence: None,
-            truncated: false,
-        })
-    }
-}
-
-/// The model selected for this CLI run.
-pub enum CliModel {
-    /// The real Needle model, loaded once at startup.
-    Needle(Box<NeedleIntentModel>),
-    /// No model was requested; every rules miss abstains.
-    Offline,
-}
-
-impl IntentModel for CliModel {
-    /// Runs the selected model, or abstains when the model is off.
-    ///
-    /// # Arguments
-    /// * `utterance` - The command text after the wake gate.
-    /// * `tools` - The closed tool list the model may call.
-    ///
-    /// # Returns
-    /// The model reply, or an empty call list when the model is off. The
-    /// router treats an empty list as "no tool matches" and asks for a
-    /// clarification.
-    ///
-    /// # Errors
-    /// Returns the real model's load, generation or payload error.
-    fn infer(&mut self, utterance: &str, tools: &[ToolSpec]) -> Result<ModelReply, ModelError> {
-        match self {
-            Self::Needle(model) => model.infer(utterance, tools),
-            Self::Offline => Ok(ModelReply {
-                calls: Vec::new(),
-                confidence: None,
-                truncated: false,
-            }),
-        }
-    }
-}
-
-/// Dynamic wrapper selecting between disabled and active intent models.
-pub enum PipelineModel {
-    /// Model inference is disabled; rule misses will clarify.
-    Disabled(DisabledModel),
-    /// Real in-process Needle 3 engine.
-    Needle(Box<nlu::NeedleIntentModel>),
-    #[cfg(test)]
-    /// Scripted fake model for unit tests.
-    Scripted(nlu::ScriptedModel),
-}
-
-impl IntentModel for PipelineModel {
-    /// Routes inference to the active model variant.
-    ///
-    /// # Arguments
-    /// * `utterance` - The recognised text.
-    /// * `tools` - The declared tool specifications.
-    ///
-    /// # Returns
-    /// The model reply with selected calls and optional confidence.
-    ///
-    /// # Errors
-    /// Returns an error if the underlying model fails.
-    fn infer(&mut self, utterance: &str, tools: &[ToolSpec]) -> Result<ModelReply, ModelError> {
-        match self {
-            Self::Disabled(m) => m.infer(utterance, tools),
-            Self::Needle(m) => m.infer(utterance, tools),
-            #[cfg(test)]
-            Self::Scripted(m) => m.infer(utterance, tools),
-        }
-    }
-}
-
-/// The streams the pipeline reads answers from and writes results to.
-pub struct PipelineIo<'a> {
-    /// Reads confirmation answers.
-    pub input: &'a mut dyn BufRead,
-    /// Receives user-facing results.
-    pub output: &'a mut dyn Write,
-}
-
-impl<'a> PipelineIo<'a> {
-    /// Creates a pipeline I/O pair from borrowed streams.
-    ///
-    /// # Arguments
-    /// * `input` - Stream to read confirmation answers from.
-    /// * `output` - Stream to write feedback and execution results to.
-    ///
-    /// # Returns
-    /// An initialized [`PipelineIo`].
-    pub fn new(input: &'a mut dyn BufRead, output: &'a mut dyn Write) -> Self {
-        Self { input, output }
-    }
-}
-
-/// The outcome of processing a single utterance line through the pipeline.
-#[derive(Debug, Clone, PartialEq)]
-pub enum StepOutcome {
-    /// Utterance was ignored because the wake word was missing and window was closed.
-    Ignored,
-    /// Utterance was solely the wake word; the listening window was opened.
-    WakeOnly,
-    /// Utterance was classified and routed as a command.
-    Handled {
-        /// The routing decision made.
-        route: Route,
-        /// The chosen intent, if one was selected.
-        chosen_intent: Option<Intent>,
-        /// Whether the executor was invoked.
-        executed: bool,
-    },
-}
-
-/// One typed-text pipeline with its wake session, model and executor.
-pub struct Pipeline<M, E> {
-    /// The wake gate and listening window shared by every line.
-    session: WakeSession,
-    /// The model used only when the rule grammar misses.
-    model: M,
-    /// The executor used only for `Run` and confirmed `Confirm` routes.
-    executor: E,
-    /// When true, routes are printed as JSON and nothing runs.
-    dry_run: bool,
-}
-
-impl<M, E> Pipeline<M, E> {
-    /// Creates a pipeline with the default wake configuration.
-    ///
-    /// # Arguments
-    /// * `model` - The intent model to consult on rule misses.
-    /// * `executor` - The executor carrying out accepted intents.
-    /// * `dry_run` - If true, outputs route decisions as JSON without executing.
-    ///
-    /// # Returns
-    /// An initialized [`Pipeline`].
-    pub fn new(model: M, executor: E, dry_run: bool) -> Self {
-        Self {
-            session: WakeSession::new(WakeConfig::default()),
-            model,
-            executor,
-            dry_run,
-        }
-    }
-
-    /// Returns the executor so tests can inspect what ran.
-    ///
-    /// # Returns
-    /// Reference to `E`.
-    pub fn executor(&self) -> &E {
-        &self.executor
-    }
-
-    /// Returns a mutable reference to the inner executor.
-    ///
-    /// # Returns
-    /// Mutable reference to `E`.
-    pub fn executor_mut(&mut self) -> &mut E {
-        &mut self.executor
-    }
-}
-
-impl<M: IntentModel, E: Executor> Pipeline<M, E> {
-    /// Processes one typed transcript and writes the user-facing result.
-    ///
-    /// # Arguments
-    /// * `transcript` - One line of typed text, as if it came from the
-    ///   microphone.
-    /// * `now` - The current time, injected so the listening window is
-    ///   deterministic in tests.
-    /// * `io` - The streams used for confirmation answers and results.
-    ///
-    /// # Returns
-    /// `Ok(())` after the result has been written, or an I/O error from the
-    /// streams. The transcript itself is never written.
-    ///
-    /// # Errors
-    /// Returns an error when reading an answer or writing a result fails.
-    pub fn process(
-        &mut self,
-        transcript: &str,
-        now: Instant,
-        io: &mut PipelineIo<'_>,
-    ) -> io::Result<()> {
-        match self.session.evaluate(transcript, now) {
-            GateResult::Ignored => writeln!(io.output, "ignored"),
-            GateResult::WakeOnly => writeln!(io.output, "listening"),
-            GateResult::Command(command) => {
-                let route = route_utterance(&command, &mut self.model);
-                self.handle_route(route, io)
-            }
-        }
-    }
-
-    /// Processes an utterance and returns a structured [`StepOutcome`].
-    ///
-    /// # Arguments
-    /// * `utterance` - Spoken or typed line of text.
-    /// * `now` - Timestamp for listening window evaluation.
-    /// * `reader` - Stream to read confirmation answers from.
-    /// * `writer` - Stream to write output to.
-    ///
-    /// # Returns
-    /// The [`StepOutcome`] indicating how the line was handled.
-    ///
-    /// # Errors
-    /// Returns an error message if I/O fails.
-    pub fn process_utterance<R: BufRead, W: Write>(
-        &mut self,
-        utterance: &str,
-        now: Instant,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> Result<StepOutcome, String> {
-        let gate_result = self.session.evaluate(utterance, now);
-        let command = match gate_result {
-            GateResult::Ignored => {
-                writeln!(writer, "ignored").map_err(|e| e.to_string())?;
-                return Ok(StepOutcome::Ignored);
-            }
-            GateResult::WakeOnly => {
-                writeln!(writer, "listening").map_err(|e| e.to_string())?;
-                return Ok(StepOutcome::WakeOnly);
-            }
-            GateResult::Command(command) => command,
-        };
-
-        let route = route_utterance(&command, &mut self.model);
-        let chosen_intent = match &route {
-            Route::Run(intent) | Route::Confirm(intent) => Some(intent.clone()),
-            _ => None,
-        };
-
-        if self.dry_run {
-            writeln!(writer, "{}", route_json(&route)).map_err(|e| e.to_string())?;
-            return Ok(StepOutcome::Handled {
-                route,
-                chosen_intent,
-                executed: false,
-            });
-        }
-
-        let mut io = PipelineIo::new(reader, writer);
-        match &route {
-            Route::Run(intent) => {
-                self.execute(intent, &mut io).map_err(|e| e.to_string())?;
-                Ok(StepOutcome::Handled {
-                    route,
-                    chosen_intent,
-                    executed: true,
-                })
-            }
-            Route::Confirm(intent) => {
-                let executed = self
-                    .confirm_and_report(intent.clone(), &mut io)
-                    .map_err(|e| e.to_string())?;
-                Ok(StepOutcome::Handled {
-                    route,
-                    chosen_intent,
-                    executed,
-                })
-            }
-            Route::Clarify => {
-                writeln!(io.output, "{CLARIFY_QUESTION}").map_err(|e| e.to_string())?;
-                Ok(StepOutcome::Handled {
-                    route,
-                    chosen_intent: None,
-                    executed: false,
-                })
-            }
-            Route::Reject(reason) => {
-                writeln!(io.output, "rejected: {reason:?}").map_err(|e| e.to_string())?;
-                Ok(StepOutcome::Handled {
-                    route,
-                    chosen_intent: None,
-                    executed: false,
-                })
-            }
-        }
-    }
-
-    /// Runs interactive line-by-line processing until EOF or exit command.
-    ///
-    /// # Arguments
-    /// * `reader` - Stream to read input lines from.
-    /// * `writer` - Stream to write output responses to.
-    ///
-    /// # Returns
-    /// `Ok(())` on EOF or exit.
-    ///
-    /// # Errors
-    /// Returns an error message if I/O fails.
-    pub fn run_interactive<R: BufRead, W: Write>(
-        &mut self,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> Result<(), String> {
-        let mut line = String::new();
-        while reader.read_line(&mut line).map_err(|e| e.to_string())? > 0 {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-                    break;
-                }
-                let mut io = PipelineIo::new(reader, writer);
-                self.process(trimmed, Instant::now(), &mut io)
-                    .map_err(|e| e.to_string())?;
-            }
-            line.clear();
-        }
-        Ok(())
-    }
-
-    /// Writes or carries out one route.
-    ///
-    /// # Arguments
-    /// * `route` - The decision returned by [`nlu::route_utterance`].
-    /// * `io` - The streams used for confirmation answers and results.
-    ///
-    /// # Returns
-    /// `Ok(())` once the route has been handled.
-    ///
-    /// # Errors
-    /// Returns an I/O error from the streams.
-    fn handle_route(&mut self, route: Route, io: &mut PipelineIo<'_>) -> io::Result<()> {
-        if self.dry_run {
-            return writeln!(io.output, "{}", route_json(&route));
-        }
-
-        match route {
-            Route::Run(intent) => self.execute(&intent, io),
-            Route::Confirm(intent) => {
-                let _ = self.confirm_and_report(intent, io)?;
-                Ok(())
-            }
-            Route::Clarify => writeln!(io.output, "{CLARIFY_QUESTION}"),
-            Route::Reject(reason) => writeln!(io.output, "rejected: {reason:?}"),
-        }
-    }
-
-    /// Runs one intent through the executor and writes its message.
-    ///
-    /// # Arguments
-    /// * `intent` - The grounded, safe intent to run.
-    /// * `io` - The stream that receives the executor's result.
-    ///
-    /// # Returns
-    /// `Ok(())` whether the executor succeeded or failed.
-    ///
-    /// # Errors
-    /// Returns an I/O error when writing the result fails.
-    fn execute(&mut self, intent: &Intent, io: &mut PipelineIo<'_>) -> io::Result<()> {
-        match self.executor.run(intent) {
-            Ok(message) => writeln!(io.output, "{message}"),
-            Err(error) => writeln!(io.output, "execution failed: {error}"),
-        }
-    }
-
-    /// Asks for a spoken-style yes/no answer and runs the intent only on yes.
-    ///
-    /// # Arguments
-    /// * `intent` - The risky intent waiting for confirmation.
-    /// * `io` - The streams used to print the action, read the answer and
-    ///   write the result.
-    ///
-    /// # Returns
-    /// `Ok(true)` if the action was confirmed and executed, `Ok(false)` otherwise.
-    ///
-    /// # Errors
-    /// Returns an I/O error when reading the answer or writing a result fails.
-    fn confirm_and_report(&mut self, intent: Intent, io: &mut PipelineIo<'_>) -> io::Result<bool> {
-        writeln!(io.output, "confirm: {}", intent_json(&intent))?;
-        write!(io.output, "Run this action? (yes/no) ")?;
-        io.output.flush()?;
-
-        let Some(answer) = read_answer(io.input)? else {
-            writeln!(io.output, "{CLARIFY_QUESTION}")?;
-            return Ok(false);
-        };
-
-        match nlu::parse_rule(answer.trim()) {
-            Some(Intent::Confirm) => {
-                self.execute(&intent, io)?;
-                Ok(true)
-            }
-            Some(Intent::Deny) => {
-                writeln!(io.output, "cancelled")?;
-                Ok(false)
-            }
-            _ => {
-                writeln!(io.output, "{CLARIFY_QUESTION}")?;
-                Ok(false)
-            }
-        }
-    }
-}
-
-/// Reads one line, returning `None` at end of input.
-///
-/// # Arguments
-/// * `input` - The stream to read from.
-///
-/// # Returns
-/// The line including its newline, or `None` when the stream is exhausted.
-///
-/// # Errors
-/// Returns an I/O error when reading fails.
-fn read_answer(input: &mut dyn BufRead) -> io::Result<Option<String>> {
-    let mut line = String::new();
-    let read = input.read_line(&mut line)?;
-    if read == 0 { Ok(None) } else { Ok(Some(line)) }
-}
-
-/// Serialises one intent for the confirmation line.
-///
-/// # Arguments
-/// * `intent` - The intent to show.
-///
-/// # Returns
-/// The intent's JSON form, or `null` if it cannot be serialised.
-pub fn intent_json(intent: &Intent) -> String {
-    serde_json::to_string(intent).unwrap_or_else(|_| "null".to_owned())
-}
-
-/// Serialises a route and its intent for `--dry-run`.
-///
-/// # Arguments
-/// * `route` - The decision to report.
-///
-/// # Returns
-/// One JSON object with a `route` field and, where one exists, the chosen
-/// intent. A rejection carries only the reason type, never the transcript or
-/// the model's arguments.
-pub fn route_json(route: &Route) -> String {
-    let mut object = Map::new();
-    let route_name = match route {
-        Route::Run(_) => "run",
-        Route::Confirm(_) => "confirm",
-        Route::Clarify => "clarify",
-        Route::Reject(_) => "reject",
-    };
-    object.insert("route".to_owned(), Value::String(route_name.to_owned()));
-
-    match route {
-        Route::Run(intent) | Route::Confirm(intent) => {
-            object.insert(
-                "intent".to_owned(),
-                serde_json::to_value(intent).unwrap_or(Value::Null),
-            );
-        }
-        Route::Clarify => {
-            object.insert("intent".to_owned(), Value::Null);
-        }
-        Route::Reject(reason) => {
-            object.insert("reason".to_owned(), Value::String(format!("{reason:?}")));
-            object.insert("intent".to_owned(), Value::Null);
-        }
-    }
-
-    Value::Object(object).to_string()
-}
-
-/// Converts a [`Route`] into a JSON value for dry-run inspection.
-///
-/// # Arguments
-/// * `route` - The routing decision.
-///
-/// # Returns
-/// A [`serde_json::Value`] representing the route.
-pub fn route_to_json(route: &Route) -> serde_json::Value {
-    match route {
-        Route::Run(intent) => serde_json::json!({
-            "type": "run",
-            "intent": intent,
-        }),
-        Route::Confirm(intent) => serde_json::json!({
-            "type": "confirm",
-            "intent": intent,
-        }),
-        Route::Clarify => serde_json::json!({
-            "type": "clarify",
-            "question": CLARIFY_QUESTION,
-        }),
-        Route::Reject(reason) => serde_json::json!({
-            "type": "reject",
-            "reason": format!("{reason:?}"),
-        }),
-    }
-}
-
-/// Formats an [`Intent`] into a concise description for spoken/typed confirmation.
-///
-/// # Arguments
-/// * `intent` - The intent awaiting confirmation.
-///
-/// # Returns
-/// Human-readable action description.
-pub fn format_intent_action(intent: &Intent) -> String {
-    match intent {
-        Intent::ClickElement { target } => format!("click element '{target}'"),
-        Intent::ClickNumber { n } => format!("click number {n}"),
-        Intent::FocusField { target } => format!("focus field '{target}'"),
-        Intent::TypeText { text, field } => match field {
-            Some(f) => format!("type '{text}' into field '{f}'"),
-            None => format!("type '{text}'"),
-        },
-        Intent::PressKey { key } => format!("press key {key:?}"),
-        Intent::Scroll { direction, amount } => match amount {
-            Some(a) => format!("scroll {direction:?} by {a}"),
-            None => format!("scroll {direction:?}"),
-        },
-        Intent::Zoom { direction } => format!("zoom {direction:?}"),
-        Intent::OpenApp { name } => format!("open app '{name}'"),
-        Intent::OpenUrl { url } => format!("open url '{url}'"),
-        Intent::SwitchWindow { target } => match target {
-            Some(t) => format!("switch window to '{t}'"),
-            None => "switch to next window".to_owned(),
-        },
-        Intent::ShowNumbers => "show numbers overlay".to_owned(),
-        Intent::HideNumbers => "hide numbers overlay".to_owned(),
-        Intent::ShowGrid => "show mouse grid".to_owned(),
-        Intent::GridSelect { cell } => format!("select grid cell {cell}"),
-        Intent::SetMode { mode } => format!("set mode to {mode:?}"),
-        Intent::Confirm => "confirm".to_owned(),
-        Intent::Deny => "deny".to_owned(),
-        Intent::Undo => "undo".to_owned(),
-        Intent::Cancel => "cancel".to_owned(),
-        Intent::Clarify { question } => format!("ask: {question}"),
-    }
-}
+pub use reach_runtime::pipeline::{
+    DisabledModel, Pipeline, PipelineIo, PipelineModel, format_intent_action,
+};
 
 /// Options parsed from the `pipeline` subcommand arguments.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -662,10 +109,77 @@ pub fn parse_pipeline_args(args: &[String]) -> Result<PipelineArgs, String> {
     })
 }
 
-/// Unit tests for the pipeline glue.
+/// Serialises a route and its intent for `--dry-run`.
+///
+/// # Arguments
+/// * `route` - The decision to report.
+///
+/// # Returns
+/// One JSON object with a `route` field and, where one exists, the chosen
+/// intent. A rejection carries only the reason type, never the transcript or
+/// the model's arguments.
+pub fn route_json(route: &nlu::Route) -> String {
+    let mut object = Map::new();
+    let route_name = match route {
+        nlu::Route::Run(_) => "run",
+        nlu::Route::Confirm(_) => "confirm",
+        nlu::Route::Clarify => "clarify",
+        nlu::Route::Reject(_) => "reject",
+    };
+    object.insert("route".to_owned(), Value::String(route_name.to_owned()));
+
+    match route {
+        nlu::Route::Run(intent) | nlu::Route::Confirm(intent) => {
+            object.insert(
+                "intent".to_owned(),
+                serde_json::to_value(intent).unwrap_or(Value::Null),
+            );
+        }
+        nlu::Route::Clarify => {
+            object.insert("intent".to_owned(), Value::Null);
+        }
+        nlu::Route::Reject(reason) => {
+            object.insert("reason".to_owned(), Value::String(format!("{reason:?}")));
+            object.insert("intent".to_owned(), Value::Null);
+        }
+    }
+
+    Value::Object(object).to_string()
+}
+
+/// Writes the dry-run JSON for one outcome.
+///
+/// The shared pipeline never prints this JSON itself, because `reach-runtime`
+/// deliberately has no serde dependency. The CLI keeps the formatting here.
+///
+/// # Arguments
+/// * `outcome` - The result returned by [`Pipeline::process`].
+/// * `output` - Stream that receives the JSON line.
+///
+/// # Returns
+/// `Ok(())` when the line was written, or when the outcome was not a routed
+/// command.
+///
+/// # Errors
+/// Returns an I/O error when writing fails.
+pub fn print_dry_run(outcome: &StepOutcome, output: &mut dyn Write) -> io::Result<()> {
+    if let StepOutcome::Handled { route, .. } = outcome {
+        writeln!(output, "{}", route_json(route))?;
+    }
+    Ok(())
+}
+
+/// The question the CLI prints for a clarification.
+///
+/// Kept here so the CLI output stays identical even if the shared pipeline
+/// changes how it reports the event.
+pub const CLARIFY_TEXT: &str = CLARIFY_QUESTION;
+
+/// Unit tests for the CLI-specific pipeline glue and shared pipeline behaviour.
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
+    use std::time::Instant;
 
     use nlu::{ModelCall, ModelReply, ScriptedModel};
     use reach_core::{Direction, Executor, Intent};
@@ -702,7 +216,7 @@ mod tests {
 
     /// Runs one transcript through a fresh pipeline and returns its output and
     /// the intents the fake executor recorded.
-    fn run_one<M: IntentModel>(
+    fn run_one<M: nlu::IntentModel>(
         model: M,
         transcript: &str,
         dry_run: bool,
@@ -713,9 +227,12 @@ mod tests {
         let mut pipeline = Pipeline::new(model, RecordingExecutor::default(), dry_run);
         {
             let mut io = PipelineIo::new(&mut input, &mut output);
-            pipeline
+            let outcome = pipeline
                 .process(transcript, Instant::now(), &mut io)
                 .unwrap();
+            if dry_run {
+                print_dry_run(&outcome, io.output).unwrap();
+            }
         }
         (
             String::from_utf8(output).unwrap(),
@@ -782,8 +299,13 @@ mod tests {
     /// Without --model, a rules miss asks the user to rephrase.
     #[test]
     fn rules_miss_without_model_prints_clarify() {
-        let (output, intents) = run_one(CliModel::Offline, "Reach tell me a joke", false, "");
-        assert!(output.contains(nlu::CLARIFY_QUESTION));
+        let (output, intents) = run_one(
+            PipelineModel::Disabled(DisabledModel),
+            "Reach tell me a joke",
+            false,
+            "",
+        );
+        assert!(output.contains(CLARIFY_TEXT));
         assert!(intents.is_empty());
     }
 
@@ -825,7 +347,7 @@ mod tests {
     /// A model error is reported as its reason type only.
     #[test]
     fn model_error_reveals_only_the_reject_reason() {
-        let model = ScriptedModel::from_results(vec![Err(ModelError::NoTools)]);
+        let model = ScriptedModel::from_results(vec![Err(nlu::ModelError::NoTools)]);
         let (output, intents) = run_one(model, "Reach tell me a joke", false, "");
         assert!(intents.is_empty());
         assert!(output.contains("ModelFailed"));
@@ -847,7 +369,7 @@ mod tests {
                 target: "Submit".to_owned(),
             }]
         );
-        assert!(output.contains("click_element"));
+        assert!(output.contains("click element 'Submit'"));
         assert!(output.contains("executed"));
     }
 
@@ -874,7 +396,7 @@ mod tests {
             "maybe\n",
         );
         assert!(intents.is_empty());
-        assert!(output.contains(nlu::CLARIFY_QUESTION));
+        assert!(output.contains(CLARIFY_TEXT));
     }
 
     /// Dry run prints the route and intent as JSON and never executes.
@@ -987,7 +509,7 @@ mod tests {
         assert_eq!(
             outcome,
             StepOutcome::Handled {
-                route: Route::Confirm(Intent::ClickElement {
+                route: nlu::Route::Confirm(Intent::ClickElement {
                     target: "Submit".to_owned()
                 }),
                 chosen_intent: Some(Intent::ClickElement {
@@ -1002,5 +524,14 @@ mod tests {
                 target: "Submit".to_owned()
             }]
         );
+    }
+
+    /// The dry-run helper writes nothing for a line that was not routed.
+    #[test]
+    fn dry_run_helper_ignores_non_commands() {
+        let mut output = Vec::new();
+        print_dry_run(&StepOutcome::Ignored, &mut output).unwrap();
+        assert!(output.is_empty());
+        output.flush().unwrap();
     }
 }

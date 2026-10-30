@@ -1,0 +1,15 @@
+[package]
+name = "reach-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Shared voice-loop orchestration for Reach"
+publish = false
+
+[dependencies]
+exec = { version = "0.1.0", path = "../exec" }
+nlu = { version = "0.1.0", path = "../nlu" }
+reach-core = { version = "0.1.0", path = "../core" }
+screen = { version = "0.1.0", path = "../screen" }
+
+[lints]
+workspace = true
