@@ -536,6 +536,15 @@ mod tests {
         assert!(names.contains(NO_ACTION));
     }
 
+    #[test]
+    /// Prints the tool count and tool list length in characters.
+    fn reports_tool_count_and_characters() {
+        let tools = tool_specs();
+        let json = tools_json(&tools);
+        println!("TOOL_COUNT={} TOOL_CHARS={}", tools.len(), json.len());
+        assert!(!tools.is_empty());
+    }
+
     /// Descriptions are short enough for the full tool list to fit the context.
     #[test]
     fn descriptions_are_one_short_sentence() {

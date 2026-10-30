@@ -1,286 +1,1731 @@
 [
-  { "utterance": "yes", "intent": { "action": "confirm" } },
-  { "utterance": "Yeah", "intent": { "action": "confirm" } },
-  { "utterance": "yep", "intent": { "action": "confirm" } },
-  { "utterance": "OK.", "intent": { "action": "confirm" } },
-  { "utterance": "confirm", "intent": { "action": "confirm" } },
-  { "utterance": "do it", "intent": { "action": "confirm" } },
-  { "utterance": "go ahead", "intent": { "action": "confirm" } },
-  { "utterance": "correct", "intent": { "action": "confirm" } },
-  { "utterance": "yes please", "intent": { "action": "confirm" } },
-  { "utterance": "no", "intent": { "action": "deny" } },
-  { "utterance": "nope", "intent": { "action": "deny" } },
-  { "utterance": "nah", "intent": { "action": "deny" } },
-  { "utterance": "deny", "intent": { "action": "deny" } },
-  { "utterance": "negative", "intent": { "action": "deny" } },
-  { "utterance": "no thanks", "intent": { "action": "deny" } },
-  { "utterance": "no thank you", "intent": { "action": "deny" } },
-  { "utterance": "cancel", "intent": { "action": "cancel" } },
-  { "utterance": "stop", "intent": { "action": "cancel" } },
-  { "utterance": "abort", "intent": { "action": "cancel" } },
-  { "utterance": "never mind", "intent": { "action": "cancel" } },
-  { "utterance": "nevermind", "intent": { "action": "cancel" } },
-  { "utterance": "forget it", "intent": { "action": "cancel" } },
-  { "utterance": "cancel that", "intent": { "action": "cancel" } },
-  { "utterance": "undo", "intent": { "action": "undo" } },
-  { "utterance": "undo that", "intent": { "action": "undo" } },
-  { "utterance": "undo last", "intent": { "action": "undo" } },
-
-  { "utterance": "command mode", "intent": { "action": "set_mode", "mode": "command" } },
-  { "utterance": "switch to command mode", "intent": { "action": "set_mode", "mode": "command" } },
-  { "utterance": "start command mode", "intent": { "action": "set_mode", "mode": "command" } },
-  { "utterance": "dictation mode", "intent": { "action": "set_mode", "mode": "dictation" } },
-  { "utterance": "switch to dictation", "intent": { "action": "set_mode", "mode": "dictation" } },
-  { "utterance": "start dictation", "intent": { "action": "set_mode", "mode": "dictation" } },
-  { "utterance": "stop dictation", "intent": { "action": "set_mode", "mode": "command" } },
-  { "utterance": "sleep", "intent": { "action": "set_mode", "mode": "sleep" } },
-  { "utterance": "sleep now", "intent": { "action": "set_mode", "mode": "sleep" } },
-  { "utterance": "go to sleep", "intent": { "action": "set_mode", "mode": "sleep" } },
-  { "utterance": "sleep mode", "intent": { "action": "set_mode", "mode": "sleep" } },
-  { "utterance": "stop listening", "intent": { "action": "set_mode", "mode": "sleep" } },
-  { "utterance": "wake up", "intent": { "action": "set_mode", "mode": "command" } },
-  { "utterance": "wake", "intent": { "action": "set_mode", "mode": "command" } },
-  { "utterance": "switch to sleep", "intent": { "action": "set_mode", "mode": "sleep" } },
-  { "utterance": "set mode to dictation", "intent": { "action": "set_mode", "mode": "dictation" } },
-
-  { "utterance": "show numbers", "intent": { "action": "show_numbers" } },
-  { "utterance": "show the numbers", "intent": { "action": "show_numbers" } },
-  { "utterance": "show me the numbers", "intent": { "action": "show_numbers" } },
-  { "utterance": "number the screen", "intent": { "action": "show_numbers" } },
-  { "utterance": "hide numbers", "intent": { "action": "hide_numbers" } },
-  { "utterance": "hide the numbers", "intent": { "action": "hide_numbers" } },
-  { "utterance": "remove the numbers", "intent": { "action": "hide_numbers" } },
-  { "utterance": "show grid", "intent": { "action": "show_grid" } },
-  { "utterance": "show grid now", "intent": { "action": "show_grid" } },
-  { "utterance": "show the grid", "intent": { "action": "show_grid" } },
-  { "utterance": "show mouse grid", "intent": { "action": "show_grid" } },
-  { "utterance": "show the mouse grid", "intent": { "action": "show_grid" } },
-  { "utterance": "mouse grid", "intent": { "action": "show_grid" } },
-  { "utterance": "grid 5", "intent": { "action": "grid_select", "cell": 5 } },
-  { "utterance": "grid five", "intent": { "action": "grid_select", "cell": 5 } },
-  { "utterance": "cell 9", "intent": { "action": "grid_select", "cell": 9 } },
-  { "utterance": "select cell three", "intent": { "action": "grid_select", "cell": 3 } },
-  { "utterance": "click cell 7", "intent": { "action": "grid_select", "cell": 7 } },
-  { "utterance": "grid 0", "intent": null },
-  { "utterance": "grid 10", "intent": null },
-  { "utterance": "grid", "intent": null },
-
-  { "utterance": "zoom in", "intent": { "action": "zoom", "direction": "in" } },
-  { "utterance": "zoom out", "intent": { "action": "zoom", "direction": "out" } },
-  { "utterance": "reset zoom", "intent": { "action": "zoom", "direction": "reset" } },
-  { "utterance": "zoom reset", "intent": { "action": "zoom", "direction": "reset" } },
-  { "utterance": "zoom normal", "intent": { "action": "zoom", "direction": "reset" } },
-  { "utterance": "make it bigger", "intent": { "action": "zoom", "direction": "in" } },
-  { "utterance": "make it bigger now", "intent": { "action": "zoom", "direction": "in" } },
-  { "utterance": "make it smaller", "intent": { "action": "zoom", "direction": "out" } },
-  { "utterance": "zoom in a bit", "intent": { "action": "zoom", "direction": "in" } },
-
-  { "utterance": "scroll down", "intent": { "action": "scroll", "direction": "down", "amount": null } },
-  { "utterance": "scroll up", "intent": { "action": "scroll", "direction": "up", "amount": null } },
-  { "utterance": "scroll left", "intent": { "action": "scroll", "direction": "left", "amount": null } },
-  { "utterance": "scroll right", "intent": { "action": "scroll", "direction": "right", "amount": null } },
-  { "utterance": "scroll down three", "intent": { "action": "scroll", "direction": "down", "amount": 3 } },
-  { "utterance": "scroll up 5 times", "intent": { "action": "scroll", "direction": "up", "amount": 5 } },
-  { "utterance": "scroll down twenty one steps", "intent": { "action": "scroll", "direction": "down", "amount": 21 } },
-  { "utterance": "scroll to the top", "intent": { "action": "scroll", "direction": "up", "amount": null } },
-  { "utterance": "scroll to the bottom", "intent": { "action": "scroll", "direction": "down", "amount": null } },
-  { "utterance": "scroll down please", "intent": { "action": "scroll", "direction": "down", "amount": null } },
-  { "utterance": "scroll down a bit", "intent": { "action": "scroll", "direction": "down", "amount": 1 } },
-  { "utterance": "scroll down one page", "intent": { "action": "scroll", "direction": "down", "amount": 1 } },
-  { "utterance": "scroll down 2 pages", "intent": { "action": "scroll", "direction": "down", "amount": 2 } },
-  { "utterance": "scroll page down", "intent": { "action": "scroll", "direction": "down", "amount": null } },
-  { "utterance": "scroll", "intent": null },
-  { "utterance": "scroll sideways", "intent": null },
-  { "utterance": "scroll down zero", "intent": null },
-  { "utterance": "scroll down to", "intent": null },
-  { "utterance": "scroll down for", "intent": null },
-  { "utterance": "scroll down 50", "intent": { "action": "scroll", "direction": "down", "amount": 50 } },
-  { "utterance": "scroll up and down", "intent": null },
-
-  { "utterance": "press enter", "intent": { "action": "press_key", "key": "enter" } },
-  { "utterance": "press the enter key", "intent": { "action": "press_key", "key": "enter" } },
-  { "utterance": "hit tab", "intent": { "action": "press_key", "key": "tab" } },
-  { "utterance": "press escape", "intent": { "action": "press_key", "key": "escape" } },
-  { "utterance": "press esc", "intent": { "action": "press_key", "key": "escape" } },
-  { "utterance": "press backspace", "intent": { "action": "press_key", "key": "backspace" } },
-  { "utterance": "press delete", "intent": { "action": "press_key", "key": "delete" } },
-  { "utterance": "press page up", "intent": { "action": "press_key", "key": "page_up" } },
-  { "utterance": "press page down", "intent": { "action": "press_key", "key": "page_down" } },
-  { "utterance": "press the down arrow", "intent": { "action": "press_key", "key": "down" } },
-  { "utterance": "press up", "intent": { "action": "press_key", "key": "up" } },
-  { "utterance": "press left", "intent": { "action": "press_key", "key": "left" } },
-  { "utterance": "press right", "intent": { "action": "press_key", "key": "right" } },
-  { "utterance": "press home", "intent": { "action": "press_key", "key": "home" } },
-  { "utterance": "press end", "intent": { "action": "press_key", "key": "end" } },
-  { "utterance": "press return", "intent": { "action": "press_key", "key": "enter" } },
-  { "utterance": "enter", "intent": { "action": "press_key", "key": "enter" } },
-  { "utterance": "page down", "intent": { "action": "press_key", "key": "page_down" } },
-  { "utterance": "arrow up", "intent": { "action": "press_key", "key": "up" } },
-  { "utterance": "press space", "intent": null },
-  { "utterance": "press control", "intent": null },
-  { "utterance": "press the button", "intent": { "action": "click_element", "target": "button" } },
-  { "utterance": "press submit", "intent": { "action": "click_element", "target": "submit" } },
-  { "utterance": "press the cancel button", "intent": { "action": "click_element", "target": "cancel" } },
-
-  { "utterance": "click submit", "intent": { "action": "click_element", "target": "submit" } },
-  { "utterance": "click the submit button", "intent": { "action": "click_element", "target": "submit" } },
-  { "utterance": "click on settings", "intent": { "action": "click_element", "target": "settings" } },
-  { "utterance": "click the login link", "intent": { "action": "click_element", "target": "login" } },
-  { "utterance": "click the big red button", "intent": { "action": "click_element", "target": "big red" } },
-  { "utterance": "click the button", "intent": { "action": "click_element", "target": "button" } },
-  { "utterance": "tap help", "intent": { "action": "click_element", "target": "help" } },
-  { "utterance": "choose save", "intent": { "action": "click_element", "target": "save" } },
-  { "utterance": "select the save option", "intent": { "action": "click_element", "target": "save option" } },
-  { "utterance": "click submit now", "intent": { "action": "click_element", "target": "submit" } },
-  { "utterance": "click number 4", "intent": { "action": "click_number", "n": 4 } },
-  { "utterance": "click number four", "intent": { "action": "click_number", "n": 4 } },
-  { "utterance": "click fourteen", "intent": { "action": "click_number", "n": 14 } },
-  { "utterance": "click 14", "intent": { "action": "click_number", "n": 14 } },
-  { "utterance": "tap number fourteen", "intent": { "action": "click_number", "n": 14 } },
-  { "utterance": "click the fourteenth", "intent": { "action": "click_number", "n": 14 } },
-  { "utterance": "click 4th", "intent": { "action": "click_number", "n": 4 } },
-  { "utterance": "click two", "intent": { "action": "click_number", "n": 2 } },
-  { "utterance": "click to", "intent": { "action": "click_number", "n": 2 } },
-  { "utterance": "click for", "intent": { "action": "click_number", "n": 4 } },
-  { "utterance": "click ate", "intent": { "action": "click_number", "n": 8 } },
-  { "utterance": "click one", "intent": { "action": "click_number", "n": 1 } },
-  { "utterance": "click zero", "intent": null },
-  { "utterance": "click number 0", "intent": null },
-  { "utterance": "click 4 times", "intent": null },
-  { "utterance": "click", "intent": null },
-  { "utterance": "click the", "intent": null },
-  { "utterance": "click number", "intent": null },
-  { "utterance": "click 21", "intent": { "action": "click_number", "n": 21 } },
-  { "utterance": "click twenty one", "intent": { "action": "click_number", "n": 21 } },
-  { "utterance": "click the help button", "intent": { "action": "click_element", "target": "help" } },
-  { "utterance": "click the save icon", "intent": { "action": "click_element", "target": "save" } },
-  { "utterance": "click Submit", "intent": { "action": "click_element", "target": "Submit" } },
-
-  { "utterance": "type hello", "intent": { "action": "type_text", "text": "hello", "field": null } },
-  { "utterance": "type Hello World", "intent": { "action": "type_text", "text": "Hello World", "field": null } },
-  { "utterance": "write hello", "intent": { "action": "type_text", "text": "hello", "field": null } },
-  { "utterance": "dictate hello", "intent": { "action": "type_text", "text": "hello", "field": null } },
-  { "utterance": "type hello into the search box", "intent": { "action": "type_text", "text": "hello", "field": "search" } },
-  { "utterance": "type hello into the email field", "intent": { "action": "type_text", "text": "hello", "field": "email" } },
-  { "utterance": "type hello into the message box", "intent": { "action": "type_text", "text": "hello", "field": "message" } },
-  { "utterance": "type hello into the Search Box", "intent": { "action": "type_text", "text": "hello", "field": "Search" } },
-  { "utterance": "type the word hello", "intent": { "action": "type_text", "text": "hello", "field": null } },
-  { "utterance": "type out hello", "intent": { "action": "type_text", "text": "hello", "field": null } },
-  { "utterance": "type out of office", "intent": { "action": "type_text", "text": "out of office", "field": null } },
-  { "utterance": "type \"hello world\"", "intent": { "action": "type_text", "text": "hello world", "field": null } },
-  { "utterance": "type hello please", "intent": { "action": "type_text", "text": "hello", "field": null } },
-  { "utterance": "type I am fine", "intent": { "action": "type_text", "text": "I am fine", "field": null } },
-  { "utterance": "type I went into the store", "intent": { "action": "type_text", "text": "I went into the store", "field": null } },
-  { "utterance": "can you type hello", "intent": { "action": "type_text", "text": "hello", "field": null } },
-  { "utterance": "type", "intent": null },
-  { "utterance": "type please", "intent": null },
-
-  { "utterance": "focus search", "intent": { "action": "focus_field", "target": "search" } },
-  { "utterance": "focus the search field", "intent": { "action": "focus_field", "target": "search" } },
-  { "utterance": "focus on email", "intent": { "action": "focus_field", "target": "email" } },
-  { "utterance": "focus on the Email field", "intent": { "action": "focus_field", "target": "Email" } },
-  { "utterance": "go to the search box", "intent": { "action": "focus_field", "target": "search" } },
-  { "utterance": "move to the password field", "intent": { "action": "focus_field", "target": "password" } },
-  { "utterance": "focus", "intent": null },
-  { "utterance": "focus the field", "intent": null },
-
-  { "utterance": "open chrome", "intent": { "action": "open_app", "name": "chrome" } },
-  { "utterance": "open the chrome app", "intent": { "action": "open_app", "name": "chrome" } },
-  { "utterance": "open explorer", "intent": { "action": "open_app", "name": "explorer" } },
-  { "utterance": "launch notepad", "intent": { "action": "open_app", "name": "notepad" } },
-  { "utterance": "start calculator", "intent": null },
-  { "utterance": "open app spotify", "intent": null },
-  { "utterance": "open notepad.exe", "intent": { "action": "open_app", "name": "notepad" } },
-  { "utterance": "open readme.txt", "intent": null },
-  { "utterance": "open someone@example.com", "intent": null },
-  { "utterance": "open google dot com", "intent": { "action": "open_url", "url": "google.com" } },
-  { "utterance": "visit example.com", "intent": { "action": "open_url", "url": "example.com" } },
-  { "utterance": "go to example dot com", "intent": { "action": "open_url", "url": "example.com" } },
-  { "utterance": "browse www.example.com", "intent": { "action": "open_url", "url": "www.example.com" } },
-  { "utterance": "open https://example.com/path?q=1", "intent": { "action": "open_url", "url": "https://example.com/path?q=1" } },
-  { "utterance": "open http://example.com", "intent": { "action": "open_url", "url": "http://example.com" } },
-  { "utterance": "open google dot com slash maps", "intent": { "action": "open_url", "url": "google.com/maps" } },
-  { "utterance": "open file:///C:/Windows", "intent": null },
-  { "utterance": "open javascript:alert(1)", "intent": null },
-  { "utterance": "open hello world dot com", "intent": null },
-  { "utterance": "open example dot com slash hello world", "intent": null },
-  { "utterance": "open foo dot com colon 8080", "intent": null },
-  { "utterance": "open example dot com slash javascript colon alert(1)", "intent": null },
-  { "utterance": "open https://example.com/path with space", "intent": null },
-  { "utterance": "open", "intent": null },
-  { "utterance": "open the", "intent": null },
-  { "utterance": "open the app", "intent": null },
-  { "utterance": "switch to chrome", "intent": { "action": "switch_window", "target": "chrome" } },
-  { "utterance": "switch to chrome now", "intent": { "action": "switch_window", "target": "chrome" } },
-  { "utterance": "switch to the chrome window", "intent": { "action": "switch_window", "target": "chrome" } },
-  { "utterance": "switch to the Chrome window", "intent": { "action": "switch_window", "target": "Chrome" } },
-  { "utterance": "switch window", "intent": { "action": "switch_window", "target": null } },
-  { "utterance": "next window", "intent": { "action": "switch_window", "target": null } },
-  { "utterance": "bring notepad to the front", "intent": { "action": "switch_window", "target": "notepad" } },
-  { "utterance": "switch to the previous window", "intent": null },
-  { "utterance": "go to the previous window", "intent": null },
-  { "utterance": "switch to next window", "intent": { "action": "switch_window", "target": null } },
-  { "utterance": "switch to", "intent": null },
-  { "utterance": "go to the next window", "intent": { "action": "switch_window", "target": null } },
-  { "utterance": "activate firefox", "intent": { "action": "switch_window", "target": "firefox" } },
-
-  { "utterance": "", "intent": null },
-  { "utterance": "   ", "intent": null },
-  { "utterance": "banana", "intent": null },
-  { "utterance": "hello there", "intent": null },
-  { "utterance": "um", "intent": null },
-  { "utterance": "please", "intent": null },
-  { "utterance": "Reach, click help", "intent": { "action": "click_element", "target": "help" } },
-  { "utterance": "Hey Reach, open Chrome.", "intent": { "action": "open_app", "name": "chrome" } },
-  { "utterance": "Could you type Hello World into the search box?", "intent": { "action": "type_text", "text": "Hello World", "field": "search" } },
-  { "utterance": "I want to click submit", "intent": { "action": "click_element", "target": "submit" } },
-  { "utterance": "go ahead and press enter", "intent": { "action": "press_key", "key": "enter" } },
-  { "utterance": "kindly show numbers", "intent": { "action": "show_numbers" } },
-  { "utterance": "Um, click Submit.", "intent": { "action": "click_element", "target": "Submit" } },
-  { "utterance": "can you scroll down please?", "intent": { "action": "scroll", "direction": "down", "amount": null } },
-  { "utterance": "would you open the calculator app", "intent": null },
-  { "utterance": "okay reach, show grid", "intent": { "action": "show_grid" } },
-
-  { "id": "ambient-01", "ambient": true, "utterance": "the volume of sales went up", "intent": null },
-  { "id": "ambient-02", "ambient": true, "utterance": "I'll call you in five minutes", "intent": null },
-  { "id": "ambient-03", "ambient": true, "utterance": "I can't reach the top shelf", "intent": null },
-  { "id": "ambient-04", "ambient": true, "utterance": "let's start the meeting", "intent": null },
-  { "id": "ambient-05", "ambient": true, "utterance": "please click on the link in the email I sent", "intent": null },
-  { "id": "ambient-06", "ambient": true, "utterance": "scroll through the report when you have time", "intent": null },
-  { "id": "ambient-07", "ambient": true, "utterance": "he pressed the button yesterday", "intent": null },
-  { "id": "ambient-08", "ambient": true, "utterance": "open the window it's hot", "intent": null },
-  { "id": "ambient-09", "ambient": true, "utterance": "zoom is down again", "intent": null },
-  { "id": "ambient-10", "ambient": true, "utterance": "type of blood", "intent": null },
-  { "id": "ambient-11", "ambient": true, "utterance": "tell me a joke", "intent": null },
-  { "id": "ambient-12", "ambient": true, "utterance": "what is the capital of France", "intent": null },
-  { "id": "ambient-13", "ambient": true, "utterance": "hello how are you today", "intent": null },
-  { "id": "ambient-14", "ambient": true, "utterance": "the weather is nice today", "intent": null },
-  { "id": "ambient-15", "ambient": true, "utterance": "can you hear me", "intent": null },
-  { "id": "ambient-16", "ambient": true, "utterance": "play some music", "intent": null },
-  { "id": "ambient-17", "ambient": true, "utterance": "turn up the volume", "intent": null },
-  { "id": "ambient-18", "ambient": true, "utterance": "what time is it", "intent": null },
-  { "id": "ambient-19", "ambient": true, "utterance": "send an email to John", "intent": null },
-  { "id": "ambient-20", "ambient": true, "utterance": "read the news", "intent": null },
-  { "id": "ambient-21", "ambient": true, "utterance": "close the window", "intent": null },
-  { "id": "ambient-22", "ambient": true, "utterance": "save the document", "intent": null },
-  { "id": "ambient-23", "ambient": true, "utterance": "copy this text", "intent": null },
-  { "id": "ambient-24", "ambient": true, "utterance": "paste it here", "intent": null },
-  { "id": "ambient-25", "ambient": true, "utterance": "take a screenshot", "intent": null },
-  { "id": "ambient-26", "ambient": true, "utterance": "increase the brightness", "intent": null },
-  { "id": "ambient-27", "ambient": true, "utterance": "mute the microphone", "intent": null },
-  { "id": "ambient-28", "ambient": true, "utterance": "call mom", "intent": null },
-  { "id": "ambient-29", "ambient": true, "utterance": "set a timer for five minutes", "intent": null },
-  { "id": "ambient-30", "ambient": true, "utterance": "open the door", "intent": null },
-  { "id": "ambient-31", "ambient": true, "utterance": "start the car", "intent": null },
-  { "id": "ambient-32", "ambient": true, "utterance": "launch the missiles", "intent": null },
-  { "id": "ambient-33", "ambient": true, "utterance": "go to the store", "intent": null },
-  { "id": "ambient-34", "ambient": true, "utterance": "I need to go home", "intent": null },
-  { "id": "ambient-35", "ambient": true, "utterance": "she is typing a letter", "intent": null },
-  { "id": "ambient-36", "ambient": true, "utterance": "the click was loud", "intent": null },
-  { "id": "ambient-37", "ambient": true, "utterance": "turn off the lights", "intent": null },
-  { "id": "ambient-38", "ambient": true, "utterance": "where are my keys", "intent": null },
-  { "id": "ambient-39", "ambient": true, "utterance": "I am hungry", "intent": null },
-  { "id": "ambient-40", "ambient": true, "utterance": "my phone is ringing", "intent": null },
-  { "id": "ambient-41", "ambient": true, "utterance": "the meeting starts at noon", "intent": null },
-  { "id": "ambient-42", "ambient": true, "utterance": "she sells sea shells", "intent": null }
+  {
+    "utterance": "yes",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "Yeah",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "yep",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "OK.",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "confirm",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "do it",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "go ahead",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "correct",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "yes please",
+    "intent": {
+      "action": "confirm"
+    }
+  },
+  {
+    "utterance": "no",
+    "intent": {
+      "action": "deny"
+    }
+  },
+  {
+    "utterance": "nope",
+    "intent": {
+      "action": "deny"
+    }
+  },
+  {
+    "utterance": "nah",
+    "intent": {
+      "action": "deny"
+    }
+  },
+  {
+    "utterance": "deny",
+    "intent": {
+      "action": "deny"
+    }
+  },
+  {
+    "utterance": "negative",
+    "intent": {
+      "action": "deny"
+    }
+  },
+  {
+    "utterance": "no thanks",
+    "intent": {
+      "action": "deny"
+    }
+  },
+  {
+    "utterance": "no thank you",
+    "intent": {
+      "action": "deny"
+    }
+  },
+  {
+    "utterance": "cancel",
+    "intent": {
+      "action": "cancel"
+    }
+  },
+  {
+    "utterance": "stop",
+    "intent": {
+      "action": "cancel"
+    }
+  },
+  {
+    "utterance": "abort",
+    "intent": {
+      "action": "cancel"
+    }
+  },
+  {
+    "utterance": "never mind",
+    "intent": {
+      "action": "cancel"
+    }
+  },
+  {
+    "utterance": "nevermind",
+    "intent": {
+      "action": "cancel"
+    }
+  },
+  {
+    "utterance": "forget it",
+    "intent": {
+      "action": "cancel"
+    }
+  },
+  {
+    "utterance": "cancel that",
+    "intent": {
+      "action": "cancel"
+    }
+  },
+  {
+    "utterance": "undo",
+    "intent": {
+      "action": "undo"
+    }
+  },
+  {
+    "utterance": "undo that",
+    "intent": {
+      "action": "undo"
+    }
+  },
+  {
+    "utterance": "undo last",
+    "intent": {
+      "action": "undo"
+    }
+  },
+  {
+    "utterance": "command mode",
+    "intent": {
+      "action": "set_mode",
+      "mode": "command"
+    }
+  },
+  {
+    "utterance": "switch to command mode",
+    "intent": {
+      "action": "set_mode",
+      "mode": "command"
+    }
+  },
+  {
+    "utterance": "start command mode",
+    "intent": {
+      "action": "set_mode",
+      "mode": "command"
+    }
+  },
+  {
+    "utterance": "dictation mode",
+    "intent": {
+      "action": "set_mode",
+      "mode": "dictation"
+    }
+  },
+  {
+    "utterance": "switch to dictation",
+    "intent": {
+      "action": "set_mode",
+      "mode": "dictation"
+    }
+  },
+  {
+    "utterance": "start dictation",
+    "intent": {
+      "action": "set_mode",
+      "mode": "dictation"
+    }
+  },
+  {
+    "utterance": "stop dictation",
+    "intent": {
+      "action": "set_mode",
+      "mode": "command"
+    }
+  },
+  {
+    "utterance": "sleep",
+    "intent": {
+      "action": "set_mode",
+      "mode": "sleep"
+    }
+  },
+  {
+    "utterance": "sleep now",
+    "intent": {
+      "action": "set_mode",
+      "mode": "sleep"
+    }
+  },
+  {
+    "utterance": "go to sleep",
+    "intent": {
+      "action": "set_mode",
+      "mode": "sleep"
+    }
+  },
+  {
+    "utterance": "sleep mode",
+    "intent": {
+      "action": "set_mode",
+      "mode": "sleep"
+    }
+  },
+  {
+    "utterance": "stop listening",
+    "intent": {
+      "action": "set_mode",
+      "mode": "sleep"
+    }
+  },
+  {
+    "utterance": "wake up",
+    "intent": {
+      "action": "set_mode",
+      "mode": "command"
+    }
+  },
+  {
+    "utterance": "wake",
+    "intent": {
+      "action": "set_mode",
+      "mode": "command"
+    }
+  },
+  {
+    "utterance": "switch to sleep",
+    "intent": {
+      "action": "set_mode",
+      "mode": "sleep"
+    }
+  },
+  {
+    "utterance": "set mode to dictation",
+    "intent": {
+      "action": "set_mode",
+      "mode": "dictation"
+    }
+  },
+  {
+    "utterance": "show numbers",
+    "intent": {
+      "action": "show_numbers"
+    }
+  },
+  {
+    "utterance": "show the numbers",
+    "intent": {
+      "action": "show_numbers"
+    }
+  },
+  {
+    "utterance": "show me the numbers",
+    "intent": {
+      "action": "show_numbers"
+    }
+  },
+  {
+    "utterance": "number the screen",
+    "intent": {
+      "action": "show_numbers"
+    }
+  },
+  {
+    "utterance": "hide numbers",
+    "intent": {
+      "action": "hide_numbers"
+    }
+  },
+  {
+    "utterance": "hide the numbers",
+    "intent": {
+      "action": "hide_numbers"
+    }
+  },
+  {
+    "utterance": "remove the numbers",
+    "intent": {
+      "action": "hide_numbers"
+    }
+  },
+  {
+    "utterance": "show grid",
+    "intent": {
+      "action": "show_grid"
+    }
+  },
+  {
+    "utterance": "show grid now",
+    "intent": {
+      "action": "show_grid"
+    }
+  },
+  {
+    "utterance": "show the grid",
+    "intent": {
+      "action": "show_grid"
+    }
+  },
+  {
+    "utterance": "show mouse grid",
+    "intent": {
+      "action": "show_grid"
+    }
+  },
+  {
+    "utterance": "show the mouse grid",
+    "intent": {
+      "action": "show_grid"
+    }
+  },
+  {
+    "utterance": "mouse grid",
+    "intent": {
+      "action": "show_grid"
+    }
+  },
+  {
+    "utterance": "grid 5",
+    "intent": {
+      "action": "grid_select",
+      "cell": 5
+    }
+  },
+  {
+    "utterance": "grid five",
+    "intent": {
+      "action": "grid_select",
+      "cell": 5
+    }
+  },
+  {
+    "utterance": "cell 9",
+    "intent": {
+      "action": "grid_select",
+      "cell": 9
+    }
+  },
+  {
+    "utterance": "select cell three",
+    "intent": {
+      "action": "grid_select",
+      "cell": 3
+    }
+  },
+  {
+    "utterance": "click cell 7",
+    "intent": {
+      "action": "grid_select",
+      "cell": 7
+    }
+  },
+  {
+    "utterance": "grid 0",
+    "intent": null
+  },
+  {
+    "utterance": "grid 10",
+    "intent": null
+  },
+  {
+    "utterance": "grid",
+    "intent": null
+  },
+  {
+    "utterance": "zoom in",
+    "intent": {
+      "action": "zoom",
+      "direction": "in"
+    }
+  },
+  {
+    "utterance": "zoom out",
+    "intent": {
+      "action": "zoom",
+      "direction": "out"
+    }
+  },
+  {
+    "utterance": "reset zoom",
+    "intent": {
+      "action": "zoom",
+      "direction": "reset"
+    }
+  },
+  {
+    "utterance": "zoom reset",
+    "intent": {
+      "action": "zoom",
+      "direction": "reset"
+    }
+  },
+  {
+    "utterance": "zoom normal",
+    "intent": {
+      "action": "zoom",
+      "direction": "reset"
+    }
+  },
+  {
+    "utterance": "make it bigger",
+    "intent": {
+      "action": "zoom",
+      "direction": "in"
+    }
+  },
+  {
+    "utterance": "make it bigger now",
+    "intent": {
+      "action": "zoom",
+      "direction": "in"
+    }
+  },
+  {
+    "utterance": "make it smaller",
+    "intent": {
+      "action": "zoom",
+      "direction": "out"
+    }
+  },
+  {
+    "utterance": "zoom in a bit",
+    "intent": {
+      "action": "zoom",
+      "direction": "in"
+    }
+  },
+  {
+    "utterance": "scroll down",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "scroll up",
+    "intent": {
+      "action": "scroll",
+      "direction": "up",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "scroll left",
+    "intent": {
+      "action": "scroll",
+      "direction": "left",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "scroll right",
+    "intent": {
+      "action": "scroll",
+      "direction": "right",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "scroll down three",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": 3
+    }
+  },
+  {
+    "utterance": "scroll up 5 times",
+    "intent": {
+      "action": "scroll",
+      "direction": "up",
+      "amount": 5
+    }
+  },
+  {
+    "utterance": "scroll down twenty one steps",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": 21
+    }
+  },
+  {
+    "utterance": "scroll to the top",
+    "intent": {
+      "action": "scroll",
+      "direction": "up",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "scroll to the bottom",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "scroll down please",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "scroll down a bit",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": 1
+    }
+  },
+  {
+    "utterance": "scroll down one page",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": 1
+    }
+  },
+  {
+    "utterance": "scroll down 2 pages",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": 2
+    }
+  },
+  {
+    "utterance": "scroll page down",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "scroll",
+    "intent": null
+  },
+  {
+    "utterance": "scroll sideways",
+    "intent": null
+  },
+  {
+    "utterance": "scroll down zero",
+    "intent": null
+  },
+  {
+    "utterance": "scroll down to",
+    "intent": null
+  },
+  {
+    "utterance": "scroll down for",
+    "intent": null
+  },
+  {
+    "utterance": "scroll down 50",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": 50
+    }
+  },
+  {
+    "utterance": "scroll up and down",
+    "intent": null
+  },
+  {
+    "utterance": "press enter",
+    "intent": {
+      "action": "press_key",
+      "key": "enter"
+    }
+  },
+  {
+    "utterance": "press the enter key",
+    "intent": {
+      "action": "press_key",
+      "key": "enter"
+    }
+  },
+  {
+    "utterance": "hit tab",
+    "intent": {
+      "action": "press_key",
+      "key": "tab"
+    }
+  },
+  {
+    "utterance": "press escape",
+    "intent": {
+      "action": "press_key",
+      "key": "escape"
+    }
+  },
+  {
+    "utterance": "press esc",
+    "intent": {
+      "action": "press_key",
+      "key": "escape"
+    }
+  },
+  {
+    "utterance": "press backspace",
+    "intent": {
+      "action": "press_key",
+      "key": "backspace"
+    }
+  },
+  {
+    "utterance": "press delete",
+    "intent": {
+      "action": "press_key",
+      "key": "delete"
+    }
+  },
+  {
+    "utterance": "press page up",
+    "intent": {
+      "action": "press_key",
+      "key": "page_up"
+    }
+  },
+  {
+    "utterance": "press page down",
+    "intent": {
+      "action": "press_key",
+      "key": "page_down"
+    }
+  },
+  {
+    "utterance": "press the down arrow",
+    "intent": {
+      "action": "press_key",
+      "key": "down"
+    }
+  },
+  {
+    "utterance": "press up",
+    "intent": {
+      "action": "press_key",
+      "key": "up"
+    }
+  },
+  {
+    "utterance": "press left",
+    "intent": {
+      "action": "press_key",
+      "key": "left"
+    }
+  },
+  {
+    "utterance": "press right",
+    "intent": {
+      "action": "press_key",
+      "key": "right"
+    }
+  },
+  {
+    "utterance": "press home",
+    "intent": {
+      "action": "press_key",
+      "key": "home"
+    }
+  },
+  {
+    "utterance": "press end",
+    "intent": {
+      "action": "press_key",
+      "key": "end"
+    }
+  },
+  {
+    "utterance": "press return",
+    "intent": {
+      "action": "press_key",
+      "key": "enter"
+    }
+  },
+  {
+    "utterance": "enter",
+    "intent": {
+      "action": "press_key",
+      "key": "enter"
+    }
+  },
+  {
+    "utterance": "page down",
+    "intent": {
+      "action": "press_key",
+      "key": "page_down"
+    }
+  },
+  {
+    "utterance": "arrow up",
+    "intent": {
+      "action": "press_key",
+      "key": "up"
+    }
+  },
+  {
+    "utterance": "press space",
+    "intent": null
+  },
+  {
+    "utterance": "press control",
+    "intent": null
+  },
+  {
+    "utterance": "press the button",
+    "intent": {
+      "action": "click_element",
+      "target": "button"
+    }
+  },
+  {
+    "utterance": "press submit",
+    "intent": {
+      "action": "click_element",
+      "target": "submit"
+    }
+  },
+  {
+    "utterance": "press the cancel button",
+    "intent": {
+      "action": "click_element",
+      "target": "cancel"
+    }
+  },
+  {
+    "utterance": "click submit",
+    "intent": {
+      "action": "click_element",
+      "target": "submit"
+    }
+  },
+  {
+    "utterance": "click the submit button",
+    "intent": {
+      "action": "click_element",
+      "target": "submit"
+    }
+  },
+  {
+    "utterance": "click on settings",
+    "intent": {
+      "action": "click_element",
+      "target": "settings"
+    }
+  },
+  {
+    "utterance": "click the login link",
+    "intent": {
+      "action": "click_element",
+      "target": "login"
+    }
+  },
+  {
+    "utterance": "click the big red button",
+    "intent": {
+      "action": "click_element",
+      "target": "big red"
+    }
+  },
+  {
+    "utterance": "click the button",
+    "intent": {
+      "action": "click_element",
+      "target": "button"
+    }
+  },
+  {
+    "utterance": "tap help",
+    "intent": {
+      "action": "click_element",
+      "target": "help"
+    }
+  },
+  {
+    "utterance": "choose save",
+    "intent": {
+      "action": "click_element",
+      "target": "save"
+    }
+  },
+  {
+    "utterance": "select the save option",
+    "intent": {
+      "action": "click_element",
+      "target": "save option"
+    }
+  },
+  {
+    "utterance": "click submit now",
+    "intent": {
+      "action": "click_element",
+      "target": "submit"
+    }
+  },
+  {
+    "utterance": "click number 4",
+    "intent": {
+      "action": "click_number",
+      "n": 4
+    }
+  },
+  {
+    "utterance": "click number four",
+    "intent": {
+      "action": "click_number",
+      "n": 4
+    }
+  },
+  {
+    "utterance": "click fourteen",
+    "intent": {
+      "action": "click_number",
+      "n": 14
+    }
+  },
+  {
+    "utterance": "click 14",
+    "intent": {
+      "action": "click_number",
+      "n": 14
+    }
+  },
+  {
+    "utterance": "tap number fourteen",
+    "intent": {
+      "action": "click_number",
+      "n": 14
+    }
+  },
+  {
+    "utterance": "click the fourteenth",
+    "intent": {
+      "action": "click_number",
+      "n": 14
+    }
+  },
+  {
+    "utterance": "click 4th",
+    "intent": {
+      "action": "click_number",
+      "n": 4
+    }
+  },
+  {
+    "utterance": "click two",
+    "intent": {
+      "action": "click_number",
+      "n": 2
+    }
+  },
+  {
+    "utterance": "click to",
+    "intent": {
+      "action": "click_number",
+      "n": 2
+    }
+  },
+  {
+    "utterance": "click for",
+    "intent": {
+      "action": "click_number",
+      "n": 4
+    }
+  },
+  {
+    "utterance": "click ate",
+    "intent": {
+      "action": "click_number",
+      "n": 8
+    }
+  },
+  {
+    "utterance": "click one",
+    "intent": {
+      "action": "click_number",
+      "n": 1
+    }
+  },
+  {
+    "utterance": "click zero",
+    "intent": null
+  },
+  {
+    "utterance": "click number 0",
+    "intent": null
+  },
+  {
+    "utterance": "click 4 times",
+    "intent": null
+  },
+  {
+    "utterance": "click",
+    "intent": null
+  },
+  {
+    "utterance": "click the",
+    "intent": null
+  },
+  {
+    "utterance": "click number",
+    "intent": null
+  },
+  {
+    "utterance": "click 21",
+    "intent": {
+      "action": "click_number",
+      "n": 21
+    }
+  },
+  {
+    "utterance": "click twenty one",
+    "intent": {
+      "action": "click_number",
+      "n": 21
+    }
+  },
+  {
+    "utterance": "click the help button",
+    "intent": {
+      "action": "click_element",
+      "target": "help"
+    }
+  },
+  {
+    "utterance": "click the save icon",
+    "intent": {
+      "action": "click_element",
+      "target": "save"
+    }
+  },
+  {
+    "utterance": "click Submit",
+    "intent": {
+      "action": "click_element",
+      "target": "Submit"
+    }
+  },
+  {
+    "utterance": "type hello",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type Hello World",
+    "intent": {
+      "action": "type_text",
+      "text": "Hello World",
+      "field": null
+    }
+  },
+  {
+    "utterance": "write hello",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": null
+    }
+  },
+  {
+    "utterance": "dictate hello",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type hello into the search box",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": "search"
+    }
+  },
+  {
+    "utterance": "type hello into the email field",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": "email"
+    }
+  },
+  {
+    "utterance": "type hello into the message box",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": "message"
+    }
+  },
+  {
+    "utterance": "type hello into the Search Box",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": "Search"
+    }
+  },
+  {
+    "utterance": "type the word hello",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type out hello",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type out of office",
+    "intent": {
+      "action": "type_text",
+      "text": "out of office",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type \"hello world\"",
+    "intent": {
+      "action": "type_text",
+      "text": "hello world",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type hello please",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type I am fine",
+    "intent": {
+      "action": "type_text",
+      "text": "I am fine",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type I went into the store",
+    "intent": {
+      "action": "type_text",
+      "text": "I went into the store",
+      "field": null
+    }
+  },
+  {
+    "utterance": "can you type hello",
+    "intent": {
+      "action": "type_text",
+      "text": "hello",
+      "field": null
+    }
+  },
+  {
+    "utterance": "type",
+    "intent": null
+  },
+  {
+    "utterance": "type please",
+    "intent": null
+  },
+  {
+    "utterance": "focus search",
+    "intent": {
+      "action": "focus_field",
+      "target": "search"
+    }
+  },
+  {
+    "utterance": "focus the search field",
+    "intent": {
+      "action": "focus_field",
+      "target": "search"
+    }
+  },
+  {
+    "utterance": "focus on email",
+    "intent": {
+      "action": "focus_field",
+      "target": "email"
+    }
+  },
+  {
+    "utterance": "focus on the Email field",
+    "intent": {
+      "action": "focus_field",
+      "target": "Email"
+    }
+  },
+  {
+    "utterance": "go to the search box",
+    "intent": {
+      "action": "focus_field",
+      "target": "search"
+    }
+  },
+  {
+    "utterance": "move to the password field",
+    "intent": {
+      "action": "focus_field",
+      "target": "password"
+    }
+  },
+  {
+    "utterance": "focus",
+    "intent": null
+  },
+  {
+    "utterance": "focus the field",
+    "intent": null
+  },
+  {
+    "utterance": "open chrome",
+    "intent": {
+      "action": "open_app",
+      "name": "chrome"
+    }
+  },
+  {
+    "utterance": "open the chrome app",
+    "intent": {
+      "action": "open_app",
+      "name": "chrome"
+    }
+  },
+  {
+    "utterance": "open explorer",
+    "intent": {
+      "action": "open_app",
+      "name": "explorer"
+    }
+  },
+  {
+    "utterance": "launch notepad",
+    "intent": {
+      "action": "open_app",
+      "name": "notepad"
+    }
+  },
+  {
+    "utterance": "start calculator",
+    "intent": null
+  },
+  {
+    "utterance": "open app spotify",
+    "intent": null
+  },
+  {
+    "utterance": "open notepad.exe",
+    "intent": {
+      "action": "open_app",
+      "name": "notepad"
+    }
+  },
+  {
+    "utterance": "open readme.txt",
+    "intent": null
+  },
+  {
+    "utterance": "open someone@example.com",
+    "intent": null
+  },
+  {
+    "utterance": "open google dot com",
+    "intent": {
+      "action": "open_url",
+      "url": "google.com"
+    }
+  },
+  {
+    "utterance": "visit example.com",
+    "intent": {
+      "action": "open_url",
+      "url": "example.com"
+    }
+  },
+  {
+    "utterance": "go to example dot com",
+    "intent": {
+      "action": "open_url",
+      "url": "example.com"
+    }
+  },
+  {
+    "utterance": "browse www.example.com",
+    "intent": {
+      "action": "open_url",
+      "url": "www.example.com"
+    }
+  },
+  {
+    "utterance": "open https://example.com/path?q=1",
+    "intent": {
+      "action": "open_url",
+      "url": "https://example.com/path?q=1"
+    }
+  },
+  {
+    "utterance": "open http://example.com",
+    "intent": {
+      "action": "open_url",
+      "url": "http://example.com"
+    }
+  },
+  {
+    "utterance": "open google dot com slash maps",
+    "intent": {
+      "action": "open_url",
+      "url": "google.com/maps"
+    }
+  },
+  {
+    "utterance": "open file:///C:/Windows",
+    "intent": null
+  },
+  {
+    "utterance": "open javascript:alert(1)",
+    "intent": null
+  },
+  {
+    "utterance": "open hello world dot com",
+    "intent": null
+  },
+  {
+    "utterance": "open example dot com slash hello world",
+    "intent": null
+  },
+  {
+    "utterance": "open foo dot com colon 8080",
+    "intent": null
+  },
+  {
+    "utterance": "open example dot com slash javascript colon alert(1)",
+    "intent": null
+  },
+  {
+    "utterance": "open https://example.com/path with space",
+    "intent": null
+  },
+  {
+    "utterance": "open",
+    "intent": null
+  },
+  {
+    "utterance": "open the",
+    "intent": null
+  },
+  {
+    "utterance": "open the app",
+    "intent": null
+  },
+  {
+    "utterance": "switch to chrome",
+    "intent": {
+      "action": "switch_window",
+      "target": "chrome"
+    }
+  },
+  {
+    "utterance": "switch to chrome now",
+    "intent": {
+      "action": "switch_window",
+      "target": "chrome"
+    }
+  },
+  {
+    "utterance": "switch to the chrome window",
+    "intent": {
+      "action": "switch_window",
+      "target": "chrome"
+    }
+  },
+  {
+    "utterance": "switch to the Chrome window",
+    "intent": {
+      "action": "switch_window",
+      "target": "Chrome"
+    }
+  },
+  {
+    "utterance": "switch window",
+    "intent": {
+      "action": "switch_window",
+      "target": null
+    }
+  },
+  {
+    "utterance": "next window",
+    "intent": {
+      "action": "switch_window",
+      "target": null
+    }
+  },
+  {
+    "utterance": "bring notepad to the front",
+    "intent": {
+      "action": "switch_window",
+      "target": "notepad"
+    }
+  },
+  {
+    "utterance": "switch to the previous window",
+    "intent": null
+  },
+  {
+    "utterance": "go to the previous window",
+    "intent": null
+  },
+  {
+    "utterance": "switch to next window",
+    "intent": {
+      "action": "switch_window",
+      "target": null
+    }
+  },
+  {
+    "utterance": "switch to",
+    "intent": {
+      "action": "clarify",
+      "question": "I didn't catch that, could you say it another way?"
+    }
+  },
+  {
+    "utterance": "go to the next window",
+    "intent": {
+      "action": "switch_window",
+      "target": null
+    }
+  },
+  {
+    "utterance": "activate firefox",
+    "intent": {
+      "action": "switch_window",
+      "target": "firefox"
+    }
+  },
+  {
+    "utterance": "",
+    "intent": null
+  },
+  {
+    "utterance": "   ",
+    "intent": null
+  },
+  {
+    "utterance": "banana",
+    "intent": null
+  },
+  {
+    "utterance": "hello there",
+    "intent": null
+  },
+  {
+    "utterance": "um",
+    "intent": null
+  },
+  {
+    "utterance": "please",
+    "intent": null
+  },
+  {
+    "utterance": "Reach, click help",
+    "intent": {
+      "action": "click_element",
+      "target": "help"
+    }
+  },
+  {
+    "utterance": "Hey Reach, open Chrome.",
+    "intent": {
+      "action": "open_app",
+      "name": "chrome"
+    }
+  },
+  {
+    "utterance": "Could you type Hello World into the search box?",
+    "intent": {
+      "action": "type_text",
+      "text": "Hello World",
+      "field": "search"
+    }
+  },
+  {
+    "utterance": "I want to click submit",
+    "intent": {
+      "action": "click_element",
+      "target": "submit"
+    }
+  },
+  {
+    "utterance": "go ahead and press enter",
+    "intent": {
+      "action": "press_key",
+      "key": "enter"
+    }
+  },
+  {
+    "utterance": "kindly show numbers",
+    "intent": {
+      "action": "show_numbers"
+    }
+  },
+  {
+    "utterance": "Um, click Submit.",
+    "intent": {
+      "action": "click_element",
+      "target": "Submit"
+    }
+  },
+  {
+    "utterance": "can you scroll down please?",
+    "intent": {
+      "action": "scroll",
+      "direction": "down",
+      "amount": null
+    }
+  },
+  {
+    "utterance": "would you open the calculator app",
+    "intent": null
+  },
+  {
+    "utterance": "okay reach, show grid",
+    "intent": {
+      "action": "show_grid"
+    }
+  },
+  {
+    "id": "ambient-01",
+    "ambient": true,
+    "utterance": "the volume of sales went up",
+    "intent": null
+  },
+  {
+    "id": "ambient-02",
+    "ambient": true,
+    "utterance": "I'll call you in five minutes",
+    "intent": null
+  },
+  {
+    "id": "ambient-03",
+    "ambient": true,
+    "utterance": "I can't reach the top shelf",
+    "intent": null
+  },
+  {
+    "id": "ambient-04",
+    "ambient": true,
+    "utterance": "let's start the meeting",
+    "intent": null
+  },
+  {
+    "id": "ambient-05",
+    "ambient": true,
+    "utterance": "please click on the link in the email I sent",
+    "intent": null
+  },
+  {
+    "id": "ambient-06",
+    "ambient": true,
+    "utterance": "scroll through the report when you have time",
+    "intent": null
+  },
+  {
+    "id": "ambient-07",
+    "ambient": true,
+    "utterance": "he pressed the button yesterday",
+    "intent": null
+  },
+  {
+    "id": "ambient-08",
+    "ambient": true,
+    "utterance": "open the window it's hot",
+    "intent": null
+  },
+  {
+    "id": "ambient-09",
+    "ambient": true,
+    "utterance": "zoom is down again",
+    "intent": null
+  },
+  {
+    "id": "ambient-10",
+    "ambient": true,
+    "utterance": "type of blood",
+    "intent": null
+  },
+  {
+    "id": "ambient-11",
+    "ambient": true,
+    "utterance": "tell me a joke",
+    "intent": null
+  },
+  {
+    "id": "ambient-12",
+    "ambient": true,
+    "utterance": "what is the capital of France",
+    "intent": null
+  },
+  {
+    "id": "ambient-13",
+    "ambient": true,
+    "utterance": "hello how are you today",
+    "intent": null
+  },
+  {
+    "id": "ambient-14",
+    "ambient": true,
+    "utterance": "the weather is nice today",
+    "intent": null
+  },
+  {
+    "id": "ambient-15",
+    "ambient": true,
+    "utterance": "can you hear me",
+    "intent": null
+  },
+  {
+    "id": "ambient-16",
+    "ambient": true,
+    "utterance": "play some music",
+    "intent": null
+  },
+  {
+    "id": "ambient-17",
+    "ambient": true,
+    "utterance": "turn up the volume",
+    "intent": null
+  },
+  {
+    "id": "ambient-18",
+    "ambient": true,
+    "utterance": "what time is it",
+    "intent": null
+  },
+  {
+    "id": "ambient-19",
+    "ambient": true,
+    "utterance": "send an email to John",
+    "intent": null
+  },
+  {
+    "id": "ambient-20",
+    "ambient": true,
+    "utterance": "read the news",
+    "intent": null
+  },
+  {
+    "id": "ambient-21",
+    "ambient": true,
+    "utterance": "close the window",
+    "intent": null
+  },
+  {
+    "id": "ambient-22",
+    "ambient": true,
+    "utterance": "save the document",
+    "intent": null
+  },
+  {
+    "id": "ambient-23",
+    "ambient": true,
+    "utterance": "copy this text",
+    "intent": null
+  },
+  {
+    "id": "ambient-24",
+    "ambient": true,
+    "utterance": "paste it here",
+    "intent": null
+  },
+  {
+    "id": "ambient-25",
+    "ambient": true,
+    "utterance": "take a screenshot",
+    "intent": null
+  },
+  {
+    "id": "ambient-26",
+    "ambient": true,
+    "utterance": "increase the brightness",
+    "intent": null
+  },
+  {
+    "id": "ambient-27",
+    "ambient": true,
+    "utterance": "mute the microphone",
+    "intent": null
+  },
+  {
+    "id": "ambient-28",
+    "ambient": true,
+    "utterance": "call mom",
+    "intent": null
+  },
+  {
+    "id": "ambient-29",
+    "ambient": true,
+    "utterance": "set a timer for five minutes",
+    "intent": null
+  },
+  {
+    "id": "ambient-30",
+    "ambient": true,
+    "utterance": "open the door",
+    "intent": null
+  },
+  {
+    "id": "ambient-31",
+    "ambient": true,
+    "utterance": "start the car",
+    "intent": null
+  },
+  {
+    "id": "ambient-32",
+    "ambient": true,
+    "utterance": "launch the missiles",
+    "intent": null
+  },
+  {
+    "id": "ambient-33",
+    "ambient": true,
+    "utterance": "go to the store",
+    "intent": null
+  },
+  {
+    "id": "ambient-34",
+    "ambient": true,
+    "utterance": "I need to go home",
+    "intent": null
+  },
+  {
+    "id": "ambient-35",
+    "ambient": true,
+    "utterance": "she is typing a letter",
+    "intent": null
+  },
+  {
+    "id": "ambient-36",
+    "ambient": true,
+    "utterance": "the click was loud",
+    "intent": null
+  },
+  {
+    "id": "ambient-37",
+    "ambient": true,
+    "utterance": "turn off the lights",
+    "intent": null
+  },
+  {
+    "id": "ambient-38",
+    "ambient": true,
+    "utterance": "where are my keys",
+    "intent": null
+  },
+  {
+    "id": "ambient-39",
+    "ambient": true,
+    "utterance": "I am hungry",
+    "intent": null
+  },
+  {
+    "id": "ambient-40",
+    "ambient": true,
+    "utterance": "my phone is ringing",
+    "intent": null
+  },
+  {
+    "id": "ambient-41",
+    "ambient": true,
+    "utterance": "the meeting starts at noon",
+    "intent": null
+  },
+  {
+    "id": "ambient-42",
+    "ambient": true,
+    "utterance": "she sells sea shells",
+    "intent": null
+  }
 ]

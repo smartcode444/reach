@@ -1,0 +1,50 @@
+# Configuration for Reach voice assistant.
+# Precedence: command-line flags override this file, which overrides defaults.
+
+# The primary wake word used to activate Reach (case-insensitive).
+wake_word = "reach"
+
+# Alternative words accepted as the wake word (case-insensitive).
+aliases = ["rich", "ridge", "reach"]
+
+# Duration in seconds the listening window stays open after a bare wake word (3 to 120).
+window_seconds = 15
+
+# Path to the Whisper speech-to-text GGML model container.
+stt_model = "models/ggml-base.en.bin"
+
+# Number of Whisper decoding threads (0 means auto: cores minus 1, minimum 1).
+whisper_threads = 0
+
+# Path to the Needle 3 in-process intent model (.cact container).
+needle_model = "models/needle3.cact"
+
+# Number of transformer layers used by Needle (1 to 20).
+# Layers 8 and 6 failed off-topic safety tests; 20 is the default.
+model_layers = 20
+
+# When true, runs in rules-only mode without loading or querying Needle.
+no_model = true
+
+# When true, disables spoken voice feedback.
+no_voice = false
+
+# Voice activity detection and utterance endpointing parameters.
+[endpoint]
+# RMS energy threshold to trigger voice detection from silence (0.0 to 1.0).
+start_threshold = 0.03
+
+# RMS energy threshold below which speech transitions back towards silence (0.0 to 1.0).
+end_threshold = 0.008
+
+# Minimum voiced duration in milliseconds required to keep an utterance.
+min_speech_ms = 400
+
+# Continuous trailing silence in milliseconds required to end an utterance.
+end_silence_ms = 700
+
+# Pre-roll audio captured before speech onset in milliseconds.
+pre_roll_ms = 200
+
+# Maximum utterance duration in milliseconds before forcing an endpoint cut.
+max_utterance_ms = 6000

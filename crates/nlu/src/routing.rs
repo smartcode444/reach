@@ -165,9 +165,31 @@ pub fn route_model_reply(utterance: &str, result: Result<ModelReply, ModelError>
 ///
 /// # Returns
 /// The same decisions as [`route_rule_intent`] and [`route_model_reply`].
+/// Minimum number of words required in an utterance to consult the model.
+pub const MIN_MODEL_WORDS: usize = 2;
+
+/// Maximum number of words allowed in an utterance to consult the model.
+pub const MAX_MODEL_WORDS: usize = 15;
+
+/// Routes one utterance, trying the rule grammar before the model.
+///
+/// Utterances with fewer than 2 words or more than 15 words are not sent to
+/// the model and ask for clarification instead.
+///
+/// # Arguments
+/// * `utterance` - The recognised text, already trimmed by the caller.
+/// * `model` - The model used only when the rule grammar has no match.
+///
+/// # Returns
+/// The same decisions as [`route_rule_intent`] and [`route_model_reply`].
 pub fn route_utterance(utterance: &str, model: &mut impl IntentModel) -> Route {
     if let Some(intent) = parse_rule(utterance) {
         return route_rule_intent(intent);
+    }
+
+    let words = utterance.split_whitespace().count();
+    if !(MIN_MODEL_WORDS..=MAX_MODEL_WORDS).contains(&words) {
+        return Route::Clarify;
     }
 
     let tools = tool_specs();
@@ -478,6 +500,24 @@ mod tests {
     }
 
     /// The rule path does not call the model at all.
+    #[test]
+    /// An utterance with fewer than 2 words is not sent to the model.
+    fn utterance_with_fewer_than_two_words_is_not_sent_to_model() {
+        let mut exhausted = ScriptedModel::new(Vec::new());
+        assert_eq!(route_utterance("whatever", &mut exhausted), Route::Clarify);
+    }
+
+    #[test]
+    /// An utterance with more than 15 words is not sent to the model.
+    fn utterance_with_more_than_fifteen_words_is_not_sent_to_model() {
+        let mut exhausted = ScriptedModel::new(Vec::new());
+        let sixteen_words = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen";
+        assert_eq!(
+            route_utterance(sixteen_words, &mut exhausted),
+            Route::Clarify
+        );
+    }
+
     #[test]
     fn rule_path_never_calls_the_model() {
         let mut exhausted = ScriptedModel::default();

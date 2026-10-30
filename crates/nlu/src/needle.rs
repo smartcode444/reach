@@ -28,7 +28,7 @@
 
 use std::path::Path;
 
-use needle_infer::v3_engine::{StopReason, V3Engine, V3Options, V3Result, extract_tool_call};
+use needle_infer::v3_engine::{StopReason, V3Engine, V3Options, extract_tool_call};
 
 use crate::model::{IntentModel, ModelError, ModelReply, calls_from_payload, validate_calls};
 use crate::tools::{ToolSpec, tools_json};
@@ -63,12 +63,29 @@ impl Default for NeedleConfig {
     }
 }
 
+/// Detailed stage timings recorded during a Needle inference pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NeedleStageTimings {
+    /// Time spent building the tool JSON specification and prompt.
+    pub prompt_build: std::time::Duration,
+    /// Time spent generating tokens through the transformer engine.
+    pub generation: std::time::Duration,
+    /// Time spent evaluating the completion through the confidence head.
+    pub confidence_pass: std::time::Duration,
+    /// Number of tools declared in the request.
+    pub tool_count: usize,
+    /// Total character length of the serialized tool list JSON.
+    pub tool_chars: usize,
+}
+
 /// A Needle 3 engine loaded once and reused for every utterance.
 pub struct NeedleIntentModel {
     /// The loaded engine; construction is the expensive step.
     engine: V3Engine,
     /// The generation cap taken from [`NeedleConfig`].
     max_new_tokens: usize,
+    /// Stage timings of the most recent inference pass.
+    last_stage_timings: NeedleStageTimings,
 }
 
 impl NeedleIntentModel {
@@ -92,6 +109,7 @@ impl NeedleIntentModel {
         Ok(Self {
             engine,
             max_new_tokens: config.max_new_tokens,
+            last_stage_timings: NeedleStageTimings::default(),
         })
     }
 
@@ -103,11 +121,29 @@ impl NeedleIntentModel {
     /// # Errors
     /// Returns [`ModelError::NoTools`] when `tools` is empty, because
     /// constrained decoding would otherwise be off.
+    /// Returns the stage timings from the most recent inference pass.
+    ///
+    /// # Returns
+    /// A [`NeedleStageTimings`] struct holding durations for prompt build,
+    /// generation, and confidence pass, plus tool count and tool list characters.
+    pub fn last_stage_timings(&self) -> NeedleStageTimings {
+        self.last_stage_timings
+    }
+
+    /// Runs constrained generation and returns the raw result and tools JSON.
+    ///
+    /// Keeping this separate lets the ignored integration test print the raw
+    /// completion when a reply is rejected, without duplicating the options.
+    ///
+    /// # Errors
+    /// Returns [`ModelError::NoTools`] when `tools` is empty, because
+    /// constrained decoding would otherwise be off.
+    #[cfg(test)]
     fn generate(
         &self,
         utterance: &str,
         tools: &[ToolSpec],
-    ) -> Result<(V3Result, String), ModelError> {
+    ) -> Result<(needle_infer::v3_engine::V3Result, String), ModelError> {
         if tools.is_empty() {
             return Err(ModelError::NoTools);
         }
@@ -142,7 +178,25 @@ impl IntentModel for NeedleIntentModel {
     /// or [`ModelError::InvalidPayloadShape`] when the payload is malformed, and
     /// [`ModelError::UndeclaredTool`] when a call names a tool outside `tools`.
     fn infer(&mut self, utterance: &str, tools: &[ToolSpec]) -> Result<ModelReply, ModelError> {
-        let (result, tools_json) = self.generate(utterance, tools)?;
+        if tools.is_empty() {
+            return Err(ModelError::NoTools);
+        }
+
+        let prompt_start = std::time::Instant::now();
+        let tools_json = tools_json(tools);
+        let prompt_build = prompt_start.elapsed();
+        let tool_count = tools.len();
+        let tool_chars = tools_json.len();
+
+        let options = V3Options {
+            max_new_tokens: self.max_new_tokens,
+            constrain: true,
+            ..V3Options::default()
+        };
+
+        let gen_start = std::time::Instant::now();
+        let result = self.engine.generate(utterance, &tools_json, &options);
+        let generation = gen_start.elapsed();
 
         let calls = match extract_tool_call(&result.text) {
             Some(payload) => match calls_from_payload(&payload) {
@@ -162,9 +216,19 @@ impl IntentModel for NeedleIntentModel {
         // Score the full completion, not the query: `confidence_for` appends
         // this string to the formatted prompt, and `run_scored` passes
         // `result.text` for the same reason.
+        let conf_start = std::time::Instant::now();
         let confidence = self
             .engine
             .confidence_for(utterance, &tools_json, &result.text);
+        let confidence_pass = conf_start.elapsed();
+
+        self.last_stage_timings = NeedleStageTimings {
+            prompt_build,
+            generation,
+            confidence_pass,
+            tool_count,
+            tool_chars,
+        };
 
         Ok(ModelReply {
             calls,
@@ -295,6 +359,10 @@ mod tests {
         let started = Instant::now();
         let scroll = infer_or_report(&mut model, "scroll down", &tools)?;
         println!("scroll down: {scroll:?} in {:?}", started.elapsed());
+        println!(
+            "scroll down stage timings: {:?}",
+            model.last_stage_timings()
+        );
         assert!(!scroll.truncated, "the scroll prompt must not be truncated");
         assert_eq!(
             scroll.calls.len(),

@@ -6,14 +6,13 @@
 //! prints the transcript.
 
 use std::io::{self, BufRead, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use nlu::tools::ToolSpec;
 use nlu::wake::{GateResult, WakeConfig, WakeSession};
-use nlu::{
-    CLARIFY_QUESTION, IntentModel, ModelError, ModelReply, NeedleIntentModel, Route,
-    route_utterance,
-};
+use nlu::{CLARIFY_QUESTION, IntentModel, ModelError, ModelReply, NeedleIntentModel, Route};
 use reach_core::{Executor, Intent};
 use serde_json::{Map, Value};
 
@@ -151,12 +150,146 @@ pub enum StepOutcome {
     },
 }
 
+/// Hard timeout for Needle model inference: 6 seconds.
+pub const MODEL_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// A request sent to the background model worker thread.
+struct ModelRequest {
+    /// Unique sequence identifier for request-response pairing.
+    id: u64,
+    /// Command text to infer.
+    command: String,
+    /// Declared tool specifications.
+    tools: Vec<ToolSpec>,
+}
+
+/// A response delivered from the background model worker thread.
+struct ModelResponse {
+    /// Sequence identifier matching the originating request.
+    id: u64,
+    /// Outcome of model inference.
+    result: Result<ModelReply, ModelError>,
+}
+
+/// Errors returned by the model worker.
+#[derive(Debug)]
+pub enum ModelWorkerError {
+    /// Model call timed out before completing.
+    Timeout,
+    /// The model returned an error.
+    Model(ModelError),
+    /// The worker thread channel was closed.
+    Disconnected,
+}
+
+/// Runs model inference on a dedicated background thread with a hard timeout.
+pub struct ModelWorker {
+    /// Channel sender delivering requests to the worker thread.
+    req_tx: Sender<ModelRequest>,
+    /// Channel receiver collecting completed responses.
+    resp_rx: Receiver<ModelResponse>,
+    /// Monotonically increasing request identifier.
+    next_id: u64,
+    /// Handle to the worker thread.
+    _worker: Option<JoinHandle<()>>,
+}
+
+impl ModelWorker {
+    /// Spawns a background worker thread that takes ownership of `model`.
+    ///
+    /// # Arguments
+    /// * `model` - The intent model implementation to execute in the background.
+    ///
+    /// # Returns
+    /// An initialized [`ModelWorker`].
+    pub fn new<M: IntentModel + Send + 'static>(mut model: M) -> Self {
+        let (req_tx, req_rx) = mpsc::channel::<ModelRequest>();
+        let (resp_tx, resp_rx) = mpsc::channel::<ModelResponse>();
+
+        let worker = thread::Builder::new()
+            .name("reach-model-worker".to_owned())
+            .spawn(move || {
+                while let Ok(req) = req_rx.recv() {
+                    let result = model.infer(&req.command, &req.tools);
+                    if resp_tx.send(ModelResponse { id: req.id, result }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
+
+        Self {
+            req_tx,
+            resp_rx,
+            next_id: 1,
+            _worker: worker,
+        }
+    }
+
+    /// Runs model inference with a hard timeout.
+    ///
+    /// Drains any late responses from prior timed-out requests.
+    ///
+    /// # Arguments
+    /// * `command` - Command text to infer.
+    /// * `tools` - Declared tool specifications.
+    /// * `timeout` - Maximum duration to wait before timing out.
+    ///
+    /// # Returns
+    /// `Ok(ModelReply)` on completion, or [`ModelWorkerError::Timeout`] on expiration.
+    pub fn infer(
+        &mut self,
+        command: &str,
+        tools: &[ToolSpec],
+        timeout: Duration,
+    ) -> Result<ModelReply, ModelWorkerError> {
+        // Drain any stale/late responses
+        while self.resp_rx.try_recv().is_ok() {}
+
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+
+        if self
+            .req_tx
+            .send(ModelRequest {
+                id,
+                command: command.to_owned(),
+                tools: tools.to_vec(),
+            })
+            .is_err()
+        {
+            return Err(ModelWorkerError::Disconnected);
+        }
+
+        let start = Instant::now();
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(ModelWorkerError::Timeout);
+            }
+            let remaining = timeout.saturating_sub(elapsed);
+            match self.resp_rx.recv_timeout(remaining) {
+                Ok(resp) => {
+                    if resp.id == id {
+                        return resp.result.map_err(ModelWorkerError::Model);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(ModelWorkerError::Timeout);
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(ModelWorkerError::Disconnected);
+                }
+            }
+        }
+    }
+}
 /// One typed-text pipeline with its wake session, model and executor.
 pub struct Pipeline<M, E> {
     /// The wake gate and listening window shared by every line.
     session: WakeSession,
-    /// The model used only when the rule grammar misses.
-    model: M,
+    /// Background worker executing model calls with a hard timeout.
+    model_worker: ModelWorker,
     /// The executor used only for `Run` and confirmed `Confirm` routes.
     executor: E,
     /// When true, routes are printed as JSON and nothing runs.
@@ -169,31 +302,15 @@ pub struct Pipeline<M, E> {
     last_needle_duration: Duration,
     /// Duration of the most recent intent execution, if any.
     last_execute_duration: Duration,
+    /// Timeout applied to model calls.
+    model_timeout: Duration,
+    /// Custom phrase rewrite configuration.
+    phrases: crate::config::PhrasesConfig,
+    /// Marker to retain type parameter M.
+    _marker: std::marker::PhantomData<fn() -> M>,
 }
 
 impl<M, E> Pipeline<M, E> {
-    /// Creates a pipeline with the default wake configuration.
-    ///
-    /// # Arguments
-    /// * `model` - The intent model to consult on rule misses.
-    /// * `executor` - The executor carrying out accepted intents.
-    /// * `dry_run` - If true, outputs route decisions as JSON without executing.
-    ///
-    /// # Returns
-    /// An initialized [`Pipeline`].
-    pub fn new(model: M, executor: E, dry_run: bool) -> Self {
-        Self {
-            session: WakeSession::new(WakeConfig::default()),
-            model,
-            executor,
-            dry_run,
-            last_route_duration: Duration::ZERO,
-            last_rules_duration: Duration::ZERO,
-            last_needle_duration: Duration::ZERO,
-            last_execute_duration: Duration::ZERO,
-        }
-    }
-
     /// Returns the duration of the most recent rule parse and routing decision.
     ///
     /// # Returns
@@ -216,29 +333,6 @@ impl<M, E> Pipeline<M, E> {
     /// The [`Duration`] spent in Needle inference, or zero if rules matched or no model was queried.
     pub fn last_needle_duration(&self) -> Duration {
         self.last_needle_duration
-    }
-
-    /// Evaluates the rule grammar first, then Needle if rules miss, recording per-stage timings.
-    ///
-    /// # Arguments
-    /// * `command` - The command string stripped of the wake word.
-    ///
-    /// # Returns
-    /// The computed [`Route`].
-    pub fn route_command(&mut self, command: &str) -> Route {
-        let rules_start = Instant::now();
-        let rule_match = nlu::parse_rule(command);
-        self.last_rules_duration = rules_start.elapsed();
-
-        if let Some(intent) = rule_match {
-            nlu::route_rule_intent(intent)
-        } else {
-            let needle_start = Instant::now();
-            let tools = nlu::tool_specs();
-            let reply = self.model.infer(command, &tools);
-            self.last_needle_duration = needle_start.elapsed();
-            nlu::route_model_reply(command, reply)
-        }
     }
 
     /// Returns the duration of the most recent intent execution.
@@ -265,9 +359,107 @@ impl<M, E> Pipeline<M, E> {
     pub fn executor_mut(&mut self) -> &mut E {
         &mut self.executor
     }
+
+    /// Sets the timeout for Needle model calls.
+    ///
+    /// # Arguments
+    /// * `timeout` - Duration to wait for model inference before timing out.
+    pub fn set_model_timeout(&mut self, timeout: Duration) {
+        self.model_timeout = timeout;
+    }
+
+    /// Sets a custom wake word configuration.
+    ///
+    /// # Arguments
+    /// * `config` - Wake word, aliases, and listening window settings.
+    ///
+    /// # Returns
+    /// The updated pipeline instance.
+    pub fn with_wake_config(mut self, config: WakeConfig) -> Self {
+        self.session = WakeSession::new(config);
+        self
+    }
+
+    /// Sets custom phrase rewrites mapping spoken phrases to canonical commands.
+    ///
+    /// # Arguments
+    /// * `phrases` - The phrases configuration loaded from `config\phrases.toml`.
+    ///
+    /// # Returns
+    /// The updated pipeline instance.
+    pub fn with_phrases(mut self, phrases: crate::config::PhrasesConfig) -> Self {
+        self.phrases = phrases;
+        self
+    }
 }
 
-impl<M: IntentModel, E: Executor> Pipeline<M, E> {
+impl<M: IntentModel + Send + 'static, E> Pipeline<M, E> {
+    /// Creates a pipeline with the default wake configuration and 6 s model timeout.
+    ///
+    /// # Arguments
+    /// * `model` - The intent model to consult on rule misses.
+    /// * `executor` - The executor carrying out accepted intents.
+    /// * `dry_run` - If true, outputs route decisions as JSON without executing.
+    ///
+    /// # Returns
+    /// An initialized [`Pipeline`].
+    pub fn new(model: M, executor: E, dry_run: bool) -> Self {
+        Self {
+            session: WakeSession::new(WakeConfig::default()),
+            model_worker: ModelWorker::new(model),
+            executor,
+            dry_run,
+            last_route_duration: Duration::ZERO,
+            last_rules_duration: Duration::ZERO,
+            last_needle_duration: Duration::ZERO,
+            last_execute_duration: Duration::ZERO,
+            model_timeout: MODEL_TIMEOUT,
+            phrases: crate::config::PhrasesConfig::default(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<M: IntentModel + Send + 'static, E: Executor> Pipeline<M, E> {
+    /// Evaluates the rule grammar first, then Needle if rules miss, recording per-stage timings.
+    ///
+    /// # Arguments
+    /// * `command` - The command string stripped of the wake word.
+    ///
+    /// # Returns
+    /// The computed [`Route`].
+    pub fn route_command(&mut self, command: &str) -> Route {
+        let rewritten = self.phrases.rewrite(command);
+        let rules_start = Instant::now();
+        let rule_match = nlu::parse_rule(&rewritten);
+        self.last_rules_duration = rules_start.elapsed();
+
+        if let Some(intent) = rule_match {
+            nlu::route_rule_intent(intent)
+        } else {
+            let command_to_model = rewritten.as_ref();
+            let words = command_to_model.split_whitespace().count();
+            if !(nlu::routing::MIN_MODEL_WORDS..=nlu::routing::MAX_MODEL_WORDS).contains(&words) {
+                return Route::Clarify;
+            }
+
+            let needle_start = Instant::now();
+            let tools = nlu::tool_specs();
+            let timeout = self.model_timeout;
+            let outcome = self.model_worker.infer(command_to_model, &tools, timeout);
+            self.last_needle_duration = needle_start.elapsed();
+
+            match outcome {
+                Ok(reply) => nlu::route_model_reply(command_to_model, Ok(reply)),
+                Err(ModelWorkerError::Timeout) => Route::Clarify,
+                Err(ModelWorkerError::Model(err)) => {
+                    nlu::route_model_reply(command_to_model, Err(err))
+                }
+                Err(ModelWorkerError::Disconnected) => Route::Clarify,
+            }
+        }
+    }
+
     /// Processes one typed transcript and writes the user-facing result.
     ///
     /// # Arguments
@@ -787,7 +979,7 @@ mod tests {
 
     /// Runs one transcript through a fresh pipeline and returns its output and
     /// the intents the fake executor recorded.
-    fn run_one<M: IntentModel>(
+    fn run_one<M: IntentModel + Send + 'static>(
         model: M,
         transcript: &str,
         dry_run: bool,
@@ -862,6 +1054,74 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("listening"));
         assert!(text.contains("executed"));
+    }
+
+    /// Commands with fewer than 2 words are not sent to the model and ask for clarify.
+    /// A slow model call times out after the configured timeout, returns Clarify, and ignores late results.
+    #[test]
+    fn model_timeout_returns_clarify_and_ignores_late_result() {
+        use std::io::Cursor;
+
+        struct SlowModel;
+        impl IntentModel for SlowModel {
+            fn infer(
+                &mut self,
+                _utterance: &str,
+                _tools: &[ToolSpec],
+            ) -> Result<ModelReply, ModelError> {
+                thread::sleep(Duration::from_millis(150));
+                Ok(reply("scroll", serde_json::json!({ "direction": "down" })))
+            }
+        }
+
+        let mut pipeline = Pipeline::new(SlowModel, RecordingExecutor::default(), false);
+        pipeline.set_model_timeout(Duration::from_millis(40));
+
+        let mut input = Cursor::new(Vec::new());
+        let mut output = Vec::new();
+        let mut io = PipelineIo::new(&mut input, &mut output);
+
+        // This command should time out and return clarify without executing
+        pipeline
+            .process("Reach tell me a joke", Instant::now(), &mut io)
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(nlu::CLARIFY_QUESTION));
+        assert!(pipeline.executor().intents.is_empty());
+
+        // Wait for the slow model to finish in the background
+        thread::sleep(Duration::from_millis(150));
+
+        // Next command with a fast rule match or fast query should work cleanly
+        let mut output2 = Vec::new();
+        let mut io2 = PipelineIo::new(&mut input, &mut output2);
+        pipeline
+            .process("Reach scroll down", Instant::now(), &mut io2)
+            .unwrap();
+        let text2 = String::from_utf8(output2).unwrap();
+        assert!(text2.contains("executed"));
+    }
+
+    #[test]
+    fn command_with_fewer_than_two_words_is_not_sent_to_model() {
+        // ScriptedModel with NO replies: if queried it would return ModelError::ScriptExhausted (ModelFailed).
+        let model = ScriptedModel::new(Vec::new());
+        let (output, intents) = run_one(model, "Reach whatever", false, "");
+        assert!(output.contains(nlu::CLARIFY_QUESTION));
+        assert!(!output.contains("ModelFailed"));
+        assert!(intents.is_empty());
+    }
+
+    /// Commands with more than 15 words are not sent to the model and ask for clarify.
+    #[test]
+    fn command_with_more_than_fifteen_words_is_not_sent_to_model() {
+        // 16 words in the command:
+        let long_command = "Reach one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen";
+        let model = ScriptedModel::new(Vec::new());
+        let (output, intents) = run_one(model, long_command, false, "");
+        assert!(output.contains(nlu::CLARIFY_QUESTION));
+        assert!(!output.contains("ModelFailed"));
+        assert!(intents.is_empty());
     }
 
     /// Without --model, a rules miss asks the user to rephrase.

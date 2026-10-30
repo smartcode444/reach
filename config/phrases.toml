@@ -1,0 +1,7 @@
+# Custom spoken phrase rewrites for Reach.
+# Maps spoken phrases to canonical command strings (for example, "scroll the page down" = "scroll down").
+# Note: phrases must be supplied and verified by a native speaker.
+# Rewriting to confirmation or denial words (yes, no, confirm, cancel) is forbidden and rejected at load.
+
+[phrases]
+

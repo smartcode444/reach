@@ -6,6 +6,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod config;
 pub mod executor;
 pub mod listen;
 pub mod pipeline;
@@ -150,11 +151,36 @@ fn run_pipeline(args: &[String]) -> Result<(), String> {
 /// # Errors
 /// Returns a load error when the model file cannot be opened or initialised.
 pub(crate) fn load_cli_model(model: bool, model_path: Option<&str>) -> Result<CliModel, String> {
+    load_cli_model_with_config(model, model_path, None)
+}
+
+/// Loads the selected intent model with layer configuration, or returns the offline stand-in.
+///
+/// # Arguments
+/// * `model` - Whether the user asked for the Needle model.
+/// * `model_path` - An optional explicit model path; the default is used when
+///   it is absent.
+/// * `layers` - Optional transformer layer count.
+///
+/// # Returns
+/// [`CliModel::Needle`] when `model` is true, otherwise [`CliModel::Offline`].
+///
+/// # Errors
+/// Returns a load error when the model file cannot be opened or initialised.
+pub(crate) fn load_cli_model_with_config(
+    model: bool,
+    model_path: Option<&str>,
+    layers: Option<usize>,
+) -> Result<CliModel, String> {
     if !model {
         return Ok(CliModel::Offline);
     }
     let path = model_path.unwrap_or(DEFAULT_MODEL_PATH);
-    let model = NeedleIntentModel::load(path, NeedleConfig::default())
+    let mut needle_config = NeedleConfig::default();
+    if let Some(l) = layers {
+        needle_config.layers = Some(l);
+    }
+    let model = NeedleIntentModel::load(path, needle_config)
         .map_err(|error| format!("failed to load Needle model: {error}"))?;
     Ok(CliModel::Needle(Box::new(model)))
 }
@@ -199,7 +225,7 @@ impl Executor for CliExecutor {
 ///
 /// # Errors
 /// Returns an I/O error from the pipeline streams.
-fn run_once<M: IntentModel, E: Executor>(
+fn run_once<M: IntentModel + Send + 'static, E: Executor>(
     pipeline: &mut Pipeline<M, E>,
     utterance: &str,
 ) -> Result<(), String> {
@@ -224,7 +250,7 @@ fn run_once<M: IntentModel, E: Executor>(
 ///
 /// # Errors
 /// Returns an I/O error from the prompt, the stdin read or a pipeline result.
-fn run_interactive<M: IntentModel, E: Executor>(
+fn run_interactive<M: IntentModel + Send + 'static, E: Executor>(
     pipeline: &mut Pipeline<M, E>,
 ) -> Result<(), String> {
     let stdin = io::stdin();

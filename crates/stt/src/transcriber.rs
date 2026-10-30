@@ -31,7 +31,7 @@ press enter, focus name field, type, open Chrome, confirm, cancel, stop.";
 /// Sampling is always greedy, timestamps and translation are always off, and
 /// non-speech tokens are always suppressed. Those behaviours are part of the
 /// Reach contract rather than user settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SttConfig {
     /// Number of decoding threads. Defaults to the available parallelism minus
     /// one, with a minimum of one, so the rest of the pipeline keeps a core.
@@ -40,15 +40,42 @@ pub struct SttConfig {
     pub language: String,
     /// Prompt used to bias decoding towards Reach's command words.
     pub initial_prompt: String,
+    /// Whether to force single segment decoding for reduced latency. Defaults to `true`.
+    pub single_segment: bool,
+    /// Maximum number of tokens to generate per utterance. Defaults to `48`.
+    pub max_tokens: usize,
+    /// Initial decoding temperature. Defaults to `0.0`.
+    pub temperature: f32,
+    /// Temperature increment for fallback when thresholds are exceeded. Defaults to `0.2`.
+    pub temperature_inc: f32,
+    /// Entropy threshold for triggering temperature fallback. Defaults to `2.4`.
+    pub entropy_thold: f32,
+    /// Log-probability threshold for triggering temperature fallback. Defaults to `-1.0`.
+    pub logprob_thold: f32,
+    /// Probability threshold for classifying audio as silence / non-speech. Defaults to `0.6`.
+    pub no_speech_thold: f32,
+    /// Whether to dynamically reduce audio context for short clips. Defaults to `true`.
+    pub dynamic_audio_ctx: bool,
+    /// Minimum audio context frame size when dynamic context is enabled. Defaults to `256`.
+    pub min_audio_ctx: usize,
 }
 
 impl Default for SttConfig {
-    /// Returns the documented default settings.
+    /// Returns the speed-optimized default settings.
     fn default() -> Self {
         Self {
             threads: default_threads(),
             language: "en".to_owned(),
             initial_prompt: DEFAULT_INITIAL_PROMPT.to_owned(),
+            single_segment: true,
+            max_tokens: 48,
+            temperature: 0.0,
+            temperature_inc: 0.2,
+            entropy_thold: 2.4,
+            logprob_thold: -1.0,
+            no_speech_thold: 0.6,
+            dynamic_audio_ctx: true,
+            min_audio_ctx: 256,
         }
     }
 }
@@ -173,7 +200,7 @@ impl Transcriber {
         validate_sample_count(samples.len())?;
 
         let config = &self.config;
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 5 });
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(config.threads as i32);
         params.set_language(Some(config.language.as_str()));
         params.set_initial_prompt(config.initial_prompt.as_str());
@@ -184,6 +211,19 @@ impl Transcriber {
         // Every utterance is independent. Without this, Whisper would use the
         // previous transcript as context and could repeat it.
         params.set_no_context(true);
+        params.set_single_segment(config.single_segment);
+        params.set_max_tokens(config.max_tokens as std::ffi::c_int);
+        params.set_temperature(config.temperature);
+        params.set_temperature_inc(config.temperature_inc);
+        params.set_entropy_thold(config.entropy_thold);
+        params.set_logprob_thold(config.logprob_thold);
+        params.set_no_speech_thold(config.no_speech_thold);
+        if config.dynamic_audio_ctx {
+            // Whisper audio context: 1 frame per 320 samples (20 ms at 16 kHz).
+            let frames = samples.len().div_ceil(320);
+            let ctx = frames.max(config.min_audio_ctx).min(1500) as std::ffi::c_int;
+            params.set_audio_ctx(ctx);
+        }
         // Keep whisper.cpp from writing transcripts or timing noise to stderr.
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -418,6 +458,46 @@ mod tests {
         assert!(
             matches!(result, Err(SttError::NoSpeech)),
             "synthetic silence must clean to None"
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmarks a 2 s clip before and after speed optimizations; run with `cargo test -p stt benchmark_2s_clip -- --ignored --nocapture`"]
+    /// Compares transcription time on a 2 s clip with and without speed settings.
+    fn benchmark_2s_clip() {
+        use std::time::Instant;
+
+        let model_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/ggml-base.en.bin");
+
+        // 1. Unoptimized baseline config:
+        let baseline_config = SttConfig {
+            single_segment: false,
+            max_tokens: 0,
+            dynamic_audio_ctx: false,
+            ..SttConfig::default()
+        };
+        let mut transcriber_baseline =
+            Transcriber::load(&model_path, baseline_config).expect("baseline model must load");
+
+        // 2 s synthetic audio clip (32_000 samples)
+        let clip_2s = vec![0.001_f32; SAMPLE_RATE as usize * 2];
+
+        let start_baseline = Instant::now();
+        let _ = transcriber_baseline.transcribe(&clip_2s);
+        let duration_baseline = start_baseline.elapsed();
+
+        // 2. Speed-optimized config:
+        let optimized_config = SttConfig::default();
+        let mut transcriber_optimized =
+            Transcriber::load(&model_path, optimized_config).expect("optimized model must load");
+
+        let start_optimized = Instant::now();
+        let _ = transcriber_optimized.transcribe(&clip_2s);
+        let duration_optimized = start_optimized.elapsed();
+
+        println!(
+            "2s clip transcription - Baseline: {duration_baseline:?}, Optimized: {duration_optimized:?}"
         );
     }
 }

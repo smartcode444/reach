@@ -103,6 +103,9 @@ pub fn clean_transcript(raw: &str) -> Option<String> {
     if is_silence_hallucination(&collapsed) {
         return None;
     }
+    if has_repetition_loop(&collapsed) {
+        return None;
+    }
     Some(collapsed)
 }
 
@@ -236,6 +239,57 @@ fn is_silence_hallucination(text: &str) -> bool {
     SILENCE_HALLUCINATIONS.contains(&normalized.as_str())
 }
 
+/// Reports whether `text` contains repetition loops.
+///
+/// Returns `true` if:
+/// - Any word repeats consecutively more than 4 times, or
+/// - In a transcript longer than 8 words, unique words make up under 30% of total words.
+///
+/// # Arguments
+/// * `text` - The cleaned, whitespace-collapsed transcript.
+///
+/// # Returns
+/// `true` if excessive repetition was detected.
+fn has_repetition_loop(text: &str) -> bool {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    if words.is_empty() {
+        return false;
+    }
+
+    // 1. Same word repeats more than 4 times in a row
+    let mut consecutive_count = 0;
+    let mut prev_word = "";
+    for word in &words {
+        if word == prev_word {
+            consecutive_count += 1;
+            if consecutive_count > 4 {
+                return true;
+            }
+        } else {
+            prev_word = word;
+            consecutive_count = 1;
+        }
+    }
+
+    // 2. Unique words under 30% of a transcript longer than 8 words
+    if words.len() > 8 {
+        let unique_count = words.iter().collect::<std::collections::HashSet<_>>().len();
+        if (unique_count as f64) / (words.len() as f64) < 0.30 {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +384,38 @@ mod tests {
     /// Punctuation-only output carries no speech and is rejected.
     fn drops_punctuation_only_output() {
         assert_eq!(clean_transcript(" ... !!! "), None);
+    }
+
+    #[test]
+    /// Repetition loops with the same word repeated more than 4 times are rejected.
+    fn repetition_guard_drops_repeated_words() {
+        assert_eq!(
+            clean_transcript("Hello Hello Hello Hello Hello Hello"),
+            None
+        );
+        assert_eq!(
+            clean_transcript("reach, reach, reach, reach, reach, reach"),
+            None
+        );
+        assert_eq!(clean_transcript("reach reach reach reach reach"), None);
+        assert_eq!(
+            clean_transcript("tap tap tap tap"),
+            Some("tap tap tap tap".to_owned())
+        );
+    }
+
+    #[test]
+    /// Transcripts longer than 8 words with under 30% unique words are rejected.
+    fn repetition_guard_drops_low_unique_word_ratio() {
+        // 9 words, only 2 unique ("one", "two") -> 22.2% unique < 30%
+        assert_eq!(
+            clean_transcript("one two one two one two one two one"),
+            None
+        );
+        // 9 words, all unique -> 100% unique >= 30%
+        assert_eq!(
+            clean_transcript("one two three four five six seven eight nine"),
+            Some("one two three four five six seven eight nine".to_owned())
+        );
     }
 }

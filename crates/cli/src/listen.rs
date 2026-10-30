@@ -10,6 +10,7 @@
 //! cleaned transcript and the estimated end-of-speech-to-result latency are
 //! printed to stdout; without it, nothing about the transcript is printed.
 
+use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use audio::{EndpointConfig, Endpointer, MicCapture};
 use reach_core::Heard;
-use stt::{SttConfig, SttError, Transcriber, clean_transcript};
+use stt::{SAMPLE_RATE, SttConfig, SttError, Transcriber, clean_transcript};
 
 use crate::executor::CompositeExecutor;
 use crate::pipeline::{Pipeline, PipelineIo};
@@ -34,7 +35,7 @@ pub const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(6);
 const FRAME_WAIT: Duration = Duration::from_millis(250);
 
 /// The options accepted by `cli listen`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ListenArgs {
     /// Whether to load and use the Needle model.
     pub model: bool,
@@ -48,6 +49,14 @@ pub struct ListenArgs {
     pub stt_model: Option<String>,
     /// Whether to disable voice output.
     pub no_voice: bool,
+    /// Whether to explicitly disable model inference (rules only).
+    pub no_model: bool,
+    /// Path to the Reach configuration file.
+    pub config_path: Option<String>,
+    /// Minimum RMS energy to trigger speech endpointing, overriding config.
+    pub start_threshold: Option<f32>,
+    /// Minimum speech duration in milliseconds, overriding config.
+    pub min_speech_ms: Option<u32>,
 }
 
 /// Parses the arguments following the `listen` subcommand.
@@ -69,6 +78,10 @@ pub fn parse_listen_args(args: &[String]) -> Result<ListenArgs, String> {
     let mut dry_run = false;
     let mut stt_model = None;
     let mut no_voice = false;
+    let mut no_model = false;
+    let mut config_path = None;
+    let mut start_threshold = None;
+    let mut min_speech_ms = None;
 
     let mut index = 0;
     while index < args.len() {
@@ -92,6 +105,9 @@ pub fn parse_listen_args(args: &[String]) -> Result<ListenArgs, String> {
             }
         } else if argument == "--no-voice" {
             no_voice = true;
+        } else if argument == "--no-model" {
+            no_model = true;
+            model = false;
         } else if argument == "--captions" {
             captions = true;
         } else if argument == "--dry-run" {
@@ -107,6 +123,45 @@ pub fn parse_listen_args(args: &[String]) -> Result<ListenArgs, String> {
                 return Err("--stt-model needs a path".to_owned());
             }
             stt_model = Some(path.to_owned());
+        } else if argument == "--config" {
+            let Some(path) = args.get(index + 1).filter(|next| !next.starts_with("--")) else {
+                return Err("--config needs a path".to_owned());
+            };
+            config_path = Some(path.clone());
+            index += 1;
+        } else if let Some(path) = argument.strip_prefix("--config=") {
+            if path.is_empty() {
+                return Err("--config needs a path".to_owned());
+            }
+            config_path = Some(path.to_owned());
+        } else if argument == "--start-threshold" {
+            let Some(val_str) = args.get(index + 1).filter(|next| !next.starts_with("--")) else {
+                return Err("--start-threshold needs a value".to_owned());
+            };
+            let val = val_str
+                .parse::<f32>()
+                .map_err(|_| "--start-threshold must be a valid float".to_owned())?;
+            start_threshold = Some(val);
+            index += 1;
+        } else if let Some(val_str) = argument.strip_prefix("--start-threshold=") {
+            let val = val_str
+                .parse::<f32>()
+                .map_err(|_| "--start-threshold must be a valid float".to_owned())?;
+            start_threshold = Some(val);
+        } else if argument == "--min-speech-ms" {
+            let Some(val_str) = args.get(index + 1).filter(|next| !next.starts_with("--")) else {
+                return Err("--min-speech-ms needs a value".to_owned());
+            };
+            let val = val_str
+                .parse::<u32>()
+                .map_err(|_| "--min-speech-ms must be a valid integer".to_owned())?;
+            min_speech_ms = Some(val);
+            index += 1;
+        } else if let Some(val_str) = argument.strip_prefix("--min-speech-ms=") {
+            let val = val_str
+                .parse::<u32>()
+                .map_err(|_| "--min-speech-ms must be a valid integer".to_owned())?;
+            min_speech_ms = Some(val);
         } else if argument == "listen" {
             // Tolerated so callers may pass the full subcommand list.
         } else if argument.starts_with("--") {
@@ -124,6 +179,10 @@ pub fn parse_listen_args(args: &[String]) -> Result<ListenArgs, String> {
         dry_run,
         stt_model,
         no_voice,
+        no_model,
+        config_path,
+        start_threshold,
+        min_speech_ms,
     })
 }
 
@@ -506,6 +565,46 @@ impl SpeechToText for Transcriber {
     }
 }
 
+/// Calculates the root-mean-square amplitude of `samples`.
+///
+/// # Arguments
+/// * `samples` - Audio samples in the range `[-1.0, 1.0]`.
+///
+/// # Returns
+/// The RMS amplitude, or `0.0` if `samples` is empty.
+pub(crate) fn clip_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
+}
+
+/// Returns the duration of `samples` in milliseconds at 16 kHz.
+///
+/// # Arguments
+/// * `samples` - Audio samples at 16 kHz.
+///
+/// # Returns
+/// The clip duration in milliseconds.
+pub(crate) fn clip_duration_ms(samples: &[f32]) -> u64 {
+    (samples.len() as u64 * 1000) / u64::from(SAMPLE_RATE)
+}
+
+/// Returns true if `text` contains the wake word ("reach" or alias "rich").
+///
+/// # Arguments
+/// * `text` - The transcript to inspect.
+///
+/// # Returns
+/// True if any whitespace-delimited word matches "reach" or "rich" case-insensitively.
+pub(crate) fn contains_wake_word(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric());
+        cleaned.eq_ignore_ascii_case("reach") || cleaned.eq_ignore_ascii_case("rich")
+    })
+}
+
 /// One recognised utterance and the estimated instant its speech ended.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VoiceUtterance {
@@ -514,8 +613,8 @@ pub struct VoiceUtterance {
     /// Estimated end of speech, derived by subtracting the endpointer's
     /// trailing-silence window from the moment the utterance was emitted.
     pub speech_ended: Instant,
-    /// Time spent waiting for trailing silence before emitting the utterance.
-    pub endpoint_wait: Duration,
+    /// Time spent waiting from end of speech to start of transcription.
+    pub queue_wait: Duration,
     /// Time taken to transcribe the audio into text.
     pub transcription_time: Duration,
 }
@@ -544,6 +643,14 @@ pub struct VoiceInput {
     consumed: usize,
     /// Set once the audio source reports that it has closed.
     closed: bool,
+    /// Energy threshold to distinguish quiet ambient sounds from speech.
+    start_threshold_rms: f32,
+    /// Whether the pipeline is currently processing an utterance.
+    is_processing: bool,
+    /// Timestamp when processing of the most recent utterance ended.
+    last_processing_ended: Option<Instant>,
+    /// Internal buffer of transcribed utterances waiting to be returned.
+    queue: VecDeque<VoiceUtterance>,
 }
 
 impl VoiceInput {
@@ -575,11 +682,114 @@ impl VoiceInput {
             stt,
             endpointer,
             trailing_silence: Duration::from_millis(u64::from(endpoint_config.end_silence_ms)),
+            start_threshold_rms: endpoint_config.start_threshold_rms,
             confirmation_timeout,
             pending: Vec::new(),
             consumed: 0,
             closed: false,
+            is_processing: false,
+            last_processing_ended: None,
+            queue: VecDeque::new(),
         })
+    }
+
+    /// Waits for, endpoints and transcribes the next utterance.
+    ///
+    /// # Arguments
+    /// * `timeout` - Overall deadline for an utterance, or `None` to wait until
+    ///   speech arrives or the source closes.
+    ///
+    /// # Returns
+    /// The recognised utterance, or `None` when the deadline passed or the
+    /// source closed. Audio that cleans to no speech is skipped.
+    ///
+    /// # Errors
+    /// Returns the recogniser's error message. It never contains the
+    /// transcript.
+    /// Enqueues an utterance into the ready queue.
+    ///
+    /// # Arguments
+    /// * `utterance` - The utterance to return on a future [`next_utterance`](Self::next_utterance) call.
+    pub fn enqueue_utterance(&mut self, utterance: VoiceUtterance) {
+        self.queue.push_back(utterance);
+    }
+
+    /// Marks that the pipeline has started processing an utterance.
+    pub fn mark_processing_started(&mut self) {
+        self.is_processing = true;
+    }
+
+    /// Marks that the pipeline has finished processing an utterance.
+    pub fn mark_processing_ended(&mut self) {
+        self.is_processing = false;
+        self.last_processing_ended = Some(Instant::now());
+    }
+
+    /// Sets whether the pipeline is actively processing an utterance.
+    ///
+    /// # Arguments
+    /// * `processing` - True while processing an action, false when idle.
+    pub fn set_processing(&mut self, processing: bool) {
+        self.is_processing = processing;
+        if !processing {
+            self.last_processing_ended = Some(Instant::now());
+        }
+    }
+
+    /// Processes a raw audio utterance, checking whether it should be dropped
+    /// if it arrived while another utterance was still being processed.
+    ///
+    /// # Arguments
+    /// * `utterance` - Audio samples from the endpointer.
+    /// * `check_busy_drop` - Whether busy-dropping logic should be applied.
+    ///
+    /// # Returns
+    /// The recognised [`VoiceUtterance`], or `None` if the clip was dropped or
+    /// contained no speech.
+    ///
+    /// # Errors
+    /// Returns the speech recognition error message.
+    fn process_raw_utterance(
+        &mut self,
+        utterance: audio::Utterance,
+        check_busy_drop: bool,
+    ) -> Result<Option<VoiceUtterance>, String> {
+        let now = Instant::now();
+        let speech_ended = now.checked_sub(self.trailing_silence).unwrap_or(now);
+        let queue_wait = now.saturating_duration_since(speech_ended);
+
+        let arrived_while_busy = check_busy_drop
+            && (self.is_processing
+                || self
+                    .last_processing_ended
+                    .is_some_and(|ended| speech_ended <= ended));
+
+        let duration_ms = clip_duration_ms(&utterance.samples);
+        let rms = clip_rms(&utterance.samples);
+        let is_short_or_quiet = duration_ms < 400 || rms < self.start_threshold_rms;
+
+        let transcribe_start = Instant::now();
+        let Some(heard) = self.stt.transcribe(&utterance.samples)? else {
+            return Ok(None);
+        };
+        let transcription_time = transcribe_start.elapsed();
+
+        if arrived_while_busy && is_short_or_quiet && !contains_wake_word(&heard.text) {
+            // Drop clips shorter than 400 ms or quieter than threshold arriving
+            // while busy, unless they contain the wake word.
+            return Ok(None);
+        }
+
+        if !self.is_processing {
+            self.last_processing_ended = None;
+        }
+
+        Ok(Some(VoiceUtterance {
+            heard,
+            speech_ended,
+            queue_wait,
+            transcription_time,
+        }))
     }
 
     /// Waits for, endpoints and transcribes the next utterance.
@@ -599,6 +809,30 @@ impl VoiceInput {
         &mut self,
         timeout: Option<Duration>,
     ) -> Result<Option<VoiceUtterance>, String> {
+        self.next_utterance_with_filter(timeout, true)
+    }
+
+    /// Internal utterance poller with an option to bypass busy-dropping.
+    ///
+    /// # Arguments
+    /// * `timeout` - Optional deadline for waiting on frames.
+    /// * `check_busy_drop` - When true, short or quiet clips arriving while
+    ///   busy without the wake word are dropped.
+    ///
+    /// # Returns
+    /// The next valid [`VoiceUtterance`], or `None`.
+    ///
+    /// # Errors
+    /// Returns speech recognition errors without exposing transcripts.
+    fn next_utterance_with_filter(
+        &mut self,
+        timeout: Option<Duration>,
+        check_busy_drop: bool,
+    ) -> Result<Option<VoiceUtterance>, String> {
+        if let Some(queued) = self.queue.pop_front() {
+            return Ok(Some(queued));
+        }
+
         if self.closed {
             return Ok(None);
         }
@@ -618,22 +852,11 @@ impl VoiceInput {
 
             match self.frames.next_frame(wait) {
                 FramePoll::Frame(frame) => {
-                    if let Some(utterance) = self.endpointer.push_frame(&frame) {
-                        let now = Instant::now();
-                        let speech_ended = now
-                            .checked_sub(self.trailing_silence)
-                            .unwrap_or(now);
-                        let endpoint_wait = now.saturating_duration_since(speech_ended);
-                        let transcribe_start = Instant::now();
-                        if let Some(heard) = self.stt.transcribe(&utterance.samples)? {
-                            let transcription_time = transcribe_start.elapsed();
-                            return Ok(Some(VoiceUtterance {
-                                heard,
-                                speech_ended,
-                                endpoint_wait,
-                                transcription_time,
-                            }));
-                        }
+                    let Some(utterance) = self.endpointer.push_frame(&frame) else {
+                        continue;
+                    };
+                    if let Some(item) = self.process_raw_utterance(utterance, check_busy_drop)? {
+                        return Ok(Some(item));
                     }
                 }
                 FramePoll::Timeout => {}
@@ -674,7 +897,7 @@ impl BufRead for VoiceInput {
         self.consumed = 0;
 
         let timeout = self.confirmation_timeout;
-        match self.next_utterance(Some(timeout)) {
+        match self.next_utterance_with_filter(Some(timeout), false) {
             Ok(Some(utterance)) => {
                 self.pending
                     .extend_from_slice(utterance.heard.text.as_bytes());
@@ -713,10 +936,11 @@ pub fn run_loop<M, E>(
     captions: bool,
 ) -> Result<(), String>
 where
-    M: nlu::IntentModel,
+    M: nlu::IntentModel + Send + 'static,
     E: reach_core::Executor,
 {
     while let Some(input) = voice.next_utterance(None)? {
+        voice.mark_processing_started();
 
         if captions {
             writeln!(feedback, "heard: {}", input.heard.text)
@@ -737,18 +961,34 @@ where
             let latency = Instant::now().saturating_duration_since(input.speech_ended);
             writeln!(
                 feedback,
-                "latency: {} ms (endpoint wait: {} ms, transcription time: {} ms, parse/route time: {} ms, execute time: {} ms)",
+                "latency: {} ms (queue wait: {} ms, transcription: {} ms, parse/route: [rules: {} ms, needle: {} ms], execution: {} ms)",
                 latency.as_millis(),
-                input.endpoint_wait.as_millis(),
+                input.queue_wait.as_millis(),
                 input.transcription_time.as_millis(),
-                pipeline.last_route_duration().as_millis(),
+                pipeline.last_rules_duration().as_millis(),
+                pipeline.last_needle_duration().as_millis(),
                 pipeline.last_execute_duration().as_millis(),
             )
             .map_err(|error| format!("could not write latency: {error}"))?;
         }
+
+        voice.mark_processing_ended();
     }
 
     Ok(())
+}
+
+/// Maximum length of one spoken command utterance in milliseconds: 6 seconds.
+pub const COMMAND_MAX_UTTERANCE_MS: u32 = 6_000;
+
+/// Returns the endpoint configuration used for voice command listening.
+///
+/// Limits maximum utterance duration to 6 seconds to prevent listening loops on continuous noise.
+pub fn command_endpoint_config() -> EndpointConfig {
+    EndpointConfig {
+        max_utterance_ms: COMMAND_MAX_UTTERANCE_MS,
+        ..EndpointConfig::default()
+    }
 }
 
 /// Runs `cli listen`.
@@ -766,18 +1006,35 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let parsed = parse_listen_args(args)?;
     install_ctrl_c_handler();
 
-    let model = crate::load_cli_model(parsed.model, parsed.model_path.as_deref())?;
+    let config_path = parsed.config_path.as_deref().unwrap_or("config/reach.toml");
+    let mut config = crate::config::ReachConfig::load_or_default(config_path)?;
+    config.apply_cli_overrides(&parsed);
+
+    let phrases = crate::config::PhrasesConfig::load_or_default("config/phrases.toml")?;
+
+    let model = if config.no_model {
+        crate::CliModel::Offline
+    } else {
+        crate::load_cli_model_with_config(
+            !config.no_model,
+            Some(&config.needle_model),
+            Some(config.model_layers as usize),
+        )?
+    };
     let executor = if parsed.dry_run {
         crate::CliExecutor::DryRun
     } else {
         crate::CliExecutor::Real(CompositeExecutor::new()?)
     };
 
-    let stt_path = parsed
-        .stt_model
-        .as_deref()
-        .unwrap_or(DEFAULT_STT_MODEL_PATH);
-    let transcriber = Transcriber::load(stt_path, SttConfig::default())
+    let mut stt_config = SttConfig::default();
+    if config.whisper_threads > 0 {
+        stt_config.threads = config.whisper_threads;
+    }
+    let stt_path = &config.stt_model;
+    // STT model path comes from resolved ReachConfig
+
+    let transcriber = Transcriber::load(stt_path, stt_config)
         .map_err(|error| format!("failed to load the speech model: {error}"))?;
 
     let capture = CaptureSource::start()?;
@@ -787,16 +1044,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
         model,
         PausingExecutor::new(executor, Box::new(control.clone())),
         parsed.dry_run,
-    );
+    )
+    .with_wake_config(nlu::wake::WakeConfig {
+        wake_word: config.wake_word.clone(),
+        aliases: config.aliases.clone(),
+        window: Duration::from_secs(u64::from(config.window_seconds)),
+    })
+    .with_phrases(phrases);
     let mut voice = VoiceInput::new(
         Box::new(capture),
         Box::new(transcriber),
-        EndpointConfig::default(),
+        config.endpoint.to_endpoint_config(),
         CONFIRMATION_TIMEOUT,
     )?;
 
     let stdout = io::stdout();
-    let speaker: Box<dyn Speaker> = if parsed.no_voice {
+    let speaker: Box<dyn Speaker> = if config.no_voice {
         Box::new(NullSpeaker::new())
     } else {
         match TtsSpeaker::new() {
@@ -1063,7 +1326,8 @@ mod tests {
         let speaker = NullSpeaker::new();
         let recorded = speaker.clone();
         {
-            let mut feedback = FeedbackWriter::new(&mut output, Box::new(control.clone()), Box::new(speaker));
+            let mut feedback =
+                FeedbackWriter::new(&mut output, Box::new(control.clone()), Box::new(speaker));
             run_loop(&mut pipeline, &mut voice, &mut feedback, captions)
                 .expect("the scripted pipeline must finish");
         }
@@ -1262,14 +1526,15 @@ mod tests {
 
         assert!(result.output.contains("heard: Reach scroll down"));
         assert!(result.output.contains("latency:"));
-        assert!(result.output.contains("endpoint wait:"));
-        assert!(result.output.contains("transcription time:"));
-        assert!(result.output.contains("parse/route time:"));
-        assert!(result.output.contains("execute time:"));
+        assert!(result.output.contains("queue wait:"));
+        assert!(result.output.contains("transcription:"));
+        assert!(result.output.contains("parse/route: [rules:"));
+        assert!(result.output.contains("needle:"));
+        assert!(result.output.contains("execution:"));
         assert!(result.output.contains(" ms"));
     }
 
-    /// Captions print latency broken down into endpoint wait, transcription, parse/route and execute time.
+    /// Captions print latency broken down into queue wait, transcription, rules, needle, and execution.
     #[test]
     fn captions_print_latency_breakdown_metrics() {
         let result = run_script(
@@ -1285,10 +1550,143 @@ mod tests {
             .find(|line| line.starts_with("latency:"))
             .expect("latency line must be present");
 
-        assert!(latency_line.contains("endpoint wait:"));
-        assert!(latency_line.contains("transcription time:"));
-        assert!(latency_line.contains("parse/route time:"));
-        assert!(latency_line.contains("execute time:"));
+        assert!(latency_line.contains("queue wait:"));
+        assert!(latency_line.contains("transcription:"));
+        assert!(latency_line.contains("rules:"));
+        assert!(latency_line.contains("needle:"));
+        assert!(latency_line.contains("execution:"));
+    }
+
+    /// Dropping logic drops short clips without the wake word that arrive while busy.
+    #[test]
+    fn busy_dropping_drops_short_clip_without_wake_word() {
+        // Build 10 frames of speech + 5 silence (15 frames = 300 ms < 400 ms)
+        let mut short_speech_frames = Vec::new();
+        for _ in 0..10 {
+            short_speech_frames.push(speech_frame());
+        }
+        for _ in 0..5 {
+            short_speech_frames.push(silence_frame());
+        }
+
+        let frames = ScriptedFrames::new(short_speech_frames);
+        let transcriber = ScriptedTranscriber::new(vec![Some("cough noise")]);
+        let mut voice = VoiceInput::new(
+            Box::new(frames),
+            Box::new(transcriber),
+            test_endpoint_config(),
+            Duration::ZERO,
+        )
+        .expect("valid config");
+
+        // Mark processing as active
+        voice.mark_processing_started();
+        let utterance = voice.next_utterance(None).expect("recognition result");
+        assert!(
+            utterance.is_none(),
+            "short clip without wake word arriving while busy must be dropped"
+        );
+    }
+
+    /// Dropping logic preserves short clips that contain the wake word even while busy.
+    #[test]
+    fn busy_dropping_keeps_short_clip_with_wake_word() {
+        // Build 10 frames of speech + 5 silence (15 frames = 300 ms < 400 ms)
+        let mut short_speech_frames = Vec::new();
+        for _ in 0..10 {
+            short_speech_frames.push(speech_frame());
+        }
+        for _ in 0..5 {
+            short_speech_frames.push(silence_frame());
+        }
+
+        let frames = ScriptedFrames::new(short_speech_frames);
+        let transcriber = ScriptedTranscriber::new(vec![Some("Reach stop")]);
+        let mut voice = VoiceInput::new(
+            Box::new(frames),
+            Box::new(transcriber),
+            test_endpoint_config(),
+            Duration::ZERO,
+        )
+        .expect("valid config");
+
+        // Mark processing as active
+        voice.mark_processing_started();
+        let utterance = voice.next_utterance(None).expect("recognition result");
+        assert!(
+            utterance.is_some(),
+            "clip containing wake word must never be dropped"
+        );
+        assert_eq!(utterance.unwrap().heard.text, "Reach stop");
+    }
+
+    /// Dropping logic drops quiet clips without the wake word that arrive while busy.
+    #[test]
+    fn busy_dropping_drops_quiet_clip_without_wake_word() {
+        // Build 25 frames (500 ms > 400 ms), but with very low amplitude (0.005 < 0.015 start threshold)
+        let mut quiet_frames = Vec::new();
+        for _ in 0..20 {
+            quiet_frames.push(FramePoll::Frame(vec![0.005; audio::FRAME_SAMPLES]));
+        }
+        for _ in 0..5 {
+            quiet_frames.push(silence_frame());
+        }
+
+        let frames = ScriptedFrames::new(quiet_frames);
+        let transcriber = ScriptedTranscriber::new(vec![Some("ambient hum")]);
+        let mut voice = VoiceInput::new(
+            Box::new(frames),
+            Box::new(transcriber),
+            test_endpoint_config(),
+            Duration::ZERO,
+        )
+        .expect("valid config");
+
+        voice.mark_processing_started();
+        let utterance = voice.next_utterance(None).expect("recognition result");
+        assert!(
+            utterance.is_none(),
+            "quiet clip without wake word arriving while busy must be dropped"
+        );
+    }
+
+    /// Short clips arriving while idle are not dropped.
+    #[test]
+    fn idle_does_not_drop_short_clip() {
+        let mut short_speech_frames = Vec::new();
+        for _ in 0..10 {
+            short_speech_frames.push(speech_frame());
+        }
+        for _ in 0..5 {
+            short_speech_frames.push(silence_frame());
+        }
+
+        let frames = ScriptedFrames::new(short_speech_frames);
+        let transcriber = ScriptedTranscriber::new(vec![Some("yes")]);
+        let mut voice = VoiceInput::new(
+            Box::new(frames),
+            Box::new(transcriber),
+            test_endpoint_config(),
+            Duration::ZERO,
+        )
+        .expect("valid config");
+
+        let utterance = voice.next_utterance(None).expect("recognition result");
+        assert!(
+            utterance.is_some(),
+            "short clip while idle must not be dropped"
+        );
+    }
+
+    /// Checks wake word detection across various phrasings.
+    #[test]
+    fn wake_word_detection_variations() {
+        assert!(contains_wake_word("Reach"));
+        assert!(contains_wake_word("reach scroll down"));
+        assert!(contains_wake_word("Rich, stop"));
+        assert!(contains_wake_word("rich!"));
+        assert!(!contains_wake_word("hello world"));
+        assert!(!contains_wake_word("cough murmur"));
     }
 
     /// Without captions, the transcript is never printed.
@@ -1358,6 +1756,21 @@ mod tests {
         assert!(!default_args.no_voice);
     }
 
+    /// Flag parsing accepts --no-model to force rules-only mode.
+    #[test]
+    fn parses_no_model_option() {
+        let args = parse_listen_args(&["--model".to_owned(), "--no-model".to_owned()]).unwrap();
+        assert!(args.no_model);
+        assert!(!args.model);
+    }
+
+    /// Command endpoint configuration limits utterances to 6 seconds.
+    #[test]
+    fn command_endpoint_config_limits_utterance_to_six_seconds() {
+        let config = command_endpoint_config();
+        assert_eq!(config.max_utterance_ms, 6_000);
+    }
+
     /// Tests that voice feedback records listening and done phrases during wake and execution.
     #[test]
     fn voice_feedback_records_phrases_during_wake_and_execution() {
@@ -1389,10 +1802,7 @@ mod tests {
 
         assert_eq!(
             result.phrases,
-            vec![
-                Phrase::Confirming(ActionLabel::Submit),
-                Phrase::Cancelled
-            ]
+            vec![Phrase::Confirming(ActionLabel::Submit), Phrase::Cancelled]
         );
     }
 
@@ -1403,7 +1813,8 @@ mod tests {
         let speaker = NullSpeaker::new();
         let recorded = speaker.clone();
         let mut output = Vec::new();
-        let mut feedback = FeedbackWriter::new(&mut output, Box::new(control.clone()), Box::new(speaker));
+        let mut feedback =
+            FeedbackWriter::new(&mut output, Box::new(control.clone()), Box::new(speaker));
 
         assert_eq!(control.pause_count(), 0);
         assert_eq!(control.resume_count(), 0);

@@ -8,6 +8,7 @@
 use reach_core::{Direction, Intent, Key, Mode, ZoomDir};
 
 use crate::numbers::{parse_number, parse_ordinal};
+use crate::routing::CLARIFY_QUESTION;
 
 /// Words that carry no command meaning and are removed before matching.
 const FILLERS: &[&str] = &["um", "uh", "erm", "er", "ah", "hmm", "please", "kindly"];
@@ -34,6 +35,7 @@ const PREFIX_PHRASES: &[&str] = &[
     "please",
     "kindly",
     "reach",
+    "just",
 ];
 
 /// Generic nouns removed from the end of a named click target.
@@ -44,7 +46,7 @@ const FIELD_NOUNS: &[&str] = &["field", "box", "input", "textarea", "area"];
 
 /// Words that may follow a scroll amount, such as "times" or "pages".
 const SCROLL_UNITS: &[&str] = &[
-    "time", "times", "step", "steps", "page", "pages", "notch", "notches",
+    "time", "times", "step", "steps", "page", "pages", "notch", "notches", "percent", "%",
 ];
 
 /// The largest scroll amount the rule grammar will act on.
@@ -79,7 +81,9 @@ const MAX_CLICK_TARGET_WORDS: usize = 4;
 const CLICK_TRIGGERS: &[&str] = &["click", "tap", "press", "hit", "choose", "select"];
 
 /// Words that introduce a focus command, used to restore spoken casing.
-const FOCUS_TRIGGERS: &[&str] = &["focus", "move", "go"];
+const FOCUS_TRIGGERS: &[&str] = &[
+    "focus", "move", "go", "click", "select", "tap", "press", "hit",
+];
 
 /// Words that introduce a window-switch command, used to restore spoken casing.
 const SWITCH_TRIGGERS: &[&str] = &["switch", "bring", "activate"];
@@ -421,6 +425,74 @@ fn strip_phrase_suffix<'a>(tokens: &'a [String], phrase: &[&str]) -> Option<&'a 
     }
 }
 
+/// Removes politeness and conversational fillers from the end of `tokens`.
+///
+/// Strips "please", "kindly", "for me", and "now" repeatedly.
+///
+/// # Arguments
+/// * `tokens` - Cleaned tokens to inspect.
+///
+/// # Returns
+/// A subslice of `tokens` with trailing politeness removed.
+fn strip_trailing_politeness(mut tokens: &[String]) -> &[String] {
+    loop {
+        let mut stripped = false;
+        for suffix in [
+            &["please"][..],
+            &["kindly"][..],
+            &["for", "me"][..],
+            &["now"][..],
+        ] {
+            if let Some(rest) = strip_phrase_suffix(tokens, suffix) {
+                tokens = rest;
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    tokens
+}
+
+/// Removes filler words and leading articles from on-screen targets.
+///
+/// Strips trailing "please", "kindly", "for me", "a little", "a bit", and "now",
+/// as well as any leading "the".
+///
+/// # Arguments
+/// * `tokens` - Cleaned tokens representing a candidate target.
+///
+/// # Returns
+/// A subslice of `tokens` with fillers and leading articles stripped.
+fn strip_target_fillers(mut tokens: &[String]) -> &[String] {
+    loop {
+        let mut stripped = false;
+        for suffix in [
+            &["please"][..],
+            &["kindly"][..],
+            &["for", "me"][..],
+            &["now"][..],
+            &["a", "bit"][..],
+            &["a", "little"][..],
+        ] {
+            if let Some(rest) = strip_phrase_suffix(tokens, suffix) {
+                tokens = rest;
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    while let Some(rest) = strip_phrase_prefix(tokens, &["the"]) {
+        tokens = rest;
+    }
+    tokens
+}
+
 /// Finds the first case-insensitive occurrence of ASCII `needle` in `text`.
 ///
 /// # Arguments
@@ -530,7 +602,7 @@ fn strip_suffix_ascii_case<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
 /// A [`Intent::TypeText`] when the utterance starts with a typing trigger and
 /// contains some text, otherwise `None`.
 fn parse_type_text(text: &str) -> Option<Intent> {
-    let rest = strip_trigger(text, &["type", "write", "dictate"])?;
+    let rest = strip_trigger(text, &["type", "write", "dictate", "enter", "put"])?;
     let rest = strip_leading_phrases(rest, &["the word", "the text"]);
     let rest = strip_out_prefix(rest);
     let (text_part, field_part) = split_field(rest);
@@ -570,7 +642,7 @@ fn is_bare_of_phrase(text: &str) -> bool {
 /// phrase. A suffix such as "into the store" is left inside the text because
 /// it does not end with a field noun.
 fn split_field(text: &str) -> (&str, Option<&str>) {
-    for marker in [" into ", " in the "] {
+    for marker in [" into the ", " into ", " in the ", " in "] {
         if let Some(index) = find_ascii_case_insensitive(text, marker) {
             let field_start = index.checked_add(marker.len()).unwrap_or(index);
             if let Some(field) = text.get(field_start..)
@@ -637,7 +709,12 @@ fn clean_field_tokens(tokens: &[String]) -> Option<String> {
     if start >= end {
         return None;
     }
-    tokens.get(start..end).map(|words| words.join(" "))
+    let words = tokens.get(start..end)?;
+    let stripped = strip_target_fillers(words);
+    if stripped.is_empty() {
+        return None;
+    }
+    Some(stripped.join(" "))
 }
 
 /// Cleans the text that will be typed.
@@ -650,10 +727,10 @@ fn clean_field_tokens(tokens: &[String]) -> Option<String> {
 /// casing and punctuation are preserved because they may be intentional.
 fn clean_typed_text(text: &str) -> String {
     let mut cleaned = strip_surrounding_quotes(text.trim()).trim();
-    cleaned = strip_leading_phrases(cleaned, &["please", "kindly"]);
+    cleaned = strip_leading_phrases(cleaned, &["please", "kindly", "just"]);
     loop {
         let mut changed = false;
-        for suffix in ["please", "kindly"] {
+        for suffix in ["please", "kindly", "for me", "now"] {
             if let Some(head) = strip_suffix_ascii_case(cleaned, suffix) {
                 cleaned = head.trim_end_matches(|c: char| c.is_whitespace() || c == ',');
                 changed = true;
@@ -710,7 +787,11 @@ fn strip_surrounding_quotes(text: &str) -> &str {
 /// # Returns
 /// The matching control intent, or `None` when the words are not an answer.
 fn parse_control(tokens: &[String]) -> Option<Intent> {
-    let tokens = strip_phrase_suffix(tokens, &["now"]).unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
+    let tokens = strip_phrase_suffix(tokens, &["a", "bit"])
+        .or_else(|| strip_phrase_suffix(tokens, &["a", "little"]))
+        .unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
     match tokens {
         [word] => match word.as_str() {
             "yes" | "yeah" | "yep" | "sure" | "okay" | "ok" | "confirm" | "correct"
@@ -743,7 +824,11 @@ fn parse_control(tokens: &[String]) -> Option<Intent> {
 /// # Returns
 /// A [`Intent::SetMode`] when the words name a mode, otherwise `None`.
 fn parse_mode(tokens: &[String]) -> Option<Intent> {
-    let tokens = strip_phrase_suffix(tokens, &["now"]).unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
+    let tokens = strip_phrase_suffix(tokens, &["a", "bit"])
+        .or_else(|| strip_phrase_suffix(tokens, &["a", "little"]))
+        .unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
     let mode = mode_phrase(tokens)
         .or_else(|| strip_phrase_prefix(tokens, &["set", "mode", "to"]).and_then(mode_phrase))
         .or_else(|| strip_phrase_prefix(tokens, &["switch", "to"]).and_then(mode_phrase))
@@ -790,7 +875,11 @@ fn mode_phrase(tokens: &[String]) -> Option<Mode> {
 /// # Returns
 /// The matching screen intent, or `None` when no screen command applies.
 fn parse_screen(tokens: &[String]) -> Option<Intent> {
-    let tokens = strip_phrase_suffix(tokens, &["now"]).unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
+    let tokens = strip_phrase_suffix(tokens, &["a", "bit"])
+        .or_else(|| strip_phrase_suffix(tokens, &["a", "little"]))
+        .unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
     if let Some(rest) = strip_phrase_prefix(tokens, &["show"]) {
         let rest = strip_phrase_prefix(rest, &["me"]).unwrap_or(rest);
         let rest = strip_phrase_prefix(rest, &["the"]).unwrap_or(rest);
@@ -850,7 +939,11 @@ fn parse_screen(tokens: &[String]) -> Option<Intent> {
 /// The value and consumed count when every token belongs to the number,
 /// otherwise `None`.
 fn trailing_number(tokens: &[String]) -> Option<(u32, usize)> {
-    let tokens = strip_phrase_suffix(tokens, &["now"]).unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
+    let tokens = strip_phrase_suffix(tokens, &["a", "bit"])
+        .or_else(|| strip_phrase_suffix(tokens, &["a", "little"]))
+        .unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
     if let Some((value, consumed)) = parse_ordinal(tokens)
         && consumed == tokens.len()
     {
@@ -872,19 +965,43 @@ fn trailing_number(tokens: &[String]) -> Option<(u32, usize)> {
 /// # Returns
 /// A [`Intent::Zoom`], or `None` when the words are not a zoom command.
 fn parse_zoom(tokens: &[String]) -> Option<Intent> {
-    let tokens = strip_phrase_suffix(tokens, &["now"]).unwrap_or(tokens);
-    if is_phrase(tokens, &["reset", "zoom"]) {
+    let tokens = strip_trailing_politeness(tokens);
+    let tokens = strip_phrase_suffix(tokens, &["a", "bit"])
+        .or_else(|| strip_phrase_suffix(tokens, &["a", "little"]))
+        .unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
+    if is_phrase(tokens, &["reset", "zoom"])
+        || is_phrase(tokens, &["zoom", "reset"])
+        || is_phrase(tokens, &["zoom", "normal"])
+    {
         return Some(Intent::Zoom {
             direction: ZoomDir::Reset,
         });
     }
-    if is_phrase(tokens, &["make", "it", "bigger"]) || is_phrase(tokens, &["make", "it", "larger"])
+    if is_phrase(tokens, &["make", "it", "bigger"])
+        || is_phrase(tokens, &["make", "the", "page", "bigger"])
+        || is_phrase(tokens, &["make", "it", "larger"])
+        || is_phrase(tokens, &["make", "the", "page", "larger"])
+        || is_phrase(tokens, &["bigger"])
+        || is_phrase(tokens, &["enlarge"])
+        || is_phrase(tokens, &["enlarge", "it"])
+        || is_phrase(tokens, &["enlarge", "the", "page"])
+        || is_phrase(tokens, &["magnify"])
+        || is_phrase(tokens, &["magnify", "it"])
+        || is_phrase(tokens, &["magnify", "the", "page"])
+        || is_phrase(tokens, &["bring", "it", "closer"])
     {
         return Some(Intent::Zoom {
             direction: ZoomDir::In,
         });
     }
-    if is_phrase(tokens, &["make", "it", "smaller"]) {
+    if is_phrase(tokens, &["make", "it", "smaller"])
+        || is_phrase(tokens, &["make", "the", "page", "smaller"])
+        || is_phrase(tokens, &["smaller"])
+        || is_phrase(tokens, &["shrink"])
+        || is_phrase(tokens, &["shrink", "it"])
+        || is_phrase(tokens, &["shrink", "the", "page"])
+    {
         return Some(Intent::Zoom {
             direction: ZoomDir::Out,
         });
@@ -929,32 +1046,65 @@ fn parse_zoom(tokens: &[String]) -> Option<Intent> {
 /// amount is invalid. Amounts above [`MAX_SCROLL_AMOUNT`] are rejected so a
 /// misheard number cannot cause a very long scroll.
 fn parse_scroll(tokens: &[String]) -> Option<Intent> {
-    let rest = strip_phrase_prefix(tokens, &["scroll"])?;
-    let rest = strip_phrase_suffix(rest, &["now"]).unwrap_or(rest);
-    let (direction, rest) = if let Some(rest) = strip_phrase_prefix(rest, &["to", "the", "top"]) {
-        (Direction::Up, rest)
-    } else if let Some(rest) = strip_phrase_prefix(rest, &["to", "the", "bottom"]) {
-        (Direction::Down, rest)
-    } else if let Some(rest) = strip_phrase_prefix(rest, &["to", "top"]) {
-        (Direction::Up, rest)
-    } else if let Some(rest) = strip_phrase_prefix(rest, &["to", "bottom"]) {
-        (Direction::Down, rest)
-    } else if let Some(rest) = strip_phrase_prefix(rest, &["page", "down"]) {
-        (Direction::Down, rest)
-    } else if let Some(rest) = strip_phrase_prefix(rest, &["page", "up"]) {
-        (Direction::Up, rest)
-    } else if let Some(rest) = strip_phrase_prefix(rest, &["down"]) {
-        (Direction::Down, rest)
-    } else if let Some(rest) = strip_phrase_prefix(rest, &["up"]) {
-        (Direction::Up, rest)
-    } else if let Some(rest) = strip_phrase_prefix(rest, &["left"]) {
-        (Direction::Left, rest)
-    } else {
-        let rest = strip_phrase_prefix(rest, &["right"])?;
-        (Direction::Right, rest)
-    };
+    let tokens = strip_trailing_politeness(tokens);
+    let (direction, rest) =
+        if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "the", "page", "down"]) {
+            (Direction::Down, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "the", "page", "up"]) {
+            (Direction::Up, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["push", "the", "page", "down"]) {
+            (Direction::Down, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["push", "the", "page", "up"]) {
+            (Direction::Up, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "to", "the", "top"])
+            .or_else(|| strip_phrase_prefix(tokens, &["scroll", "to", "top"]))
+        {
+            (Direction::Up, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "to", "the", "bottom"])
+            .or_else(|| strip_phrase_prefix(tokens, &["scroll", "to", "bottom"]))
+        {
+            (Direction::Down, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "down"]) {
+            (Direction::Down, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "up"]) {
+            (Direction::Up, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "left"]) {
+            (Direction::Left, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "right"]) {
+            (Direction::Right, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["go", "down"]) {
+            (Direction::Down, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["go", "up"]) {
+            (Direction::Up, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["move", "down"]) {
+            (Direction::Down, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["move", "up"]) {
+            (Direction::Up, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "page", "down"]) {
+            (Direction::Down, rest)
+        } else if let Some(rest) = strip_phrase_prefix(tokens, &["scroll", "page", "up"]) {
+            (Direction::Up, rest)
+        } else if strip_phrase_prefix(tokens, &["down", "a", "bit"])
+            .or_else(|| strip_phrase_prefix(tokens, &["down", "a", "little"]))
+            .is_some()
+        {
+            return Some(Intent::Scroll {
+                direction: Direction::Down,
+                amount: Some(1),
+            });
+        } else if strip_phrase_prefix(tokens, &["up", "a", "bit"])
+            .or_else(|| strip_phrase_prefix(tokens, &["up", "a", "little"]))
+            .is_some()
+        {
+            return Some(Intent::Scroll {
+                direction: Direction::Up,
+                amount: Some(1),
+            });
+        } else {
+            return None;
+        };
 
-    let rest = strip_phrase_suffix(rest, &["now"]).unwrap_or(rest);
+    let rest = strip_trailing_politeness(rest);
     if rest.is_empty() {
         return Some(Intent::Scroll {
             direction,
@@ -973,8 +1123,26 @@ fn parse_scroll(tokens: &[String]) -> Option<Intent> {
             amount: Some(1),
         });
     }
+    if is_phrase(rest, &["a", "lot"]) {
+        return Some(Intent::Scroll {
+            direction,
+            amount: Some(5),
+        });
+    }
 
     let amount_tokens = strip_phrase_prefix(rest, &["by"]).unwrap_or(rest);
+    if is_phrase(amount_tokens, &["a", "lot"]) {
+        return Some(Intent::Scroll {
+            direction,
+            amount: Some(5),
+        });
+    }
+    if is_phrase(amount_tokens, &["a", "bit"]) || is_phrase(amount_tokens, &["a", "little"]) {
+        return Some(Intent::Scroll {
+            direction,
+            amount: Some(1),
+        });
+    }
     // Homophones are useful for numbered overlay clicks but dangerous here:
     // "scroll down to" must not scroll twice.
     if is_homophone(amount_tokens.first()) {
@@ -1017,20 +1185,36 @@ fn is_all_scroll_units(tokens: &[String]) -> bool {
 /// # Returns
 /// A [`Intent::FocusField`], or `None` when the words do not name a field.
 fn parse_focus(tokens: &[String]) -> Option<Intent> {
+    let tokens = strip_trailing_politeness(tokens);
     let (rest, require_noun) = if let Some(rest) = strip_phrase_prefix(tokens, &["focus"]) {
         (strip_phrase_prefix(rest, &["on"]).unwrap_or(rest), false)
     } else if let Some(rest) = strip_phrase_prefix(tokens, &["move", "to"]) {
         (rest, true)
-    } else {
-        let rest = strip_phrase_prefix(tokens, &["go", "to"])?;
+    } else if let Some(rest) = strip_phrase_prefix(tokens, &["go", "to"]) {
         (rest, true)
+    } else if let Some(rest) = strip_phrase_prefix(tokens, &["click", "on"]) {
+        (rest, true)
+    } else if let Some(rest) = strip_phrase_prefix(tokens, &["click"]) {
+        (rest, true)
+    } else if let Some(rest) = strip_phrase_prefix(tokens, &["select"]) {
+        (rest, true)
+    } else if let Some(rest) = strip_phrase_prefix(tokens, &["press"]) {
+        (rest, true)
+    } else if let Some(rest) = strip_phrase_prefix(tokens, &["hit"]) {
+        (rest, true)
+    } else {
+        let rest = strip_phrase_prefix(tokens, &["tap"])?;
+        (strip_phrase_prefix(rest, &["on"]).unwrap_or(rest), true)
     };
 
     let rest = strip_phrase_prefix(rest, &["the"])
         .or_else(|| strip_phrase_prefix(rest, &["a"]))
         .or_else(|| strip_phrase_prefix(rest, &["an"]))
         .unwrap_or(rest);
-    let rest = strip_phrase_suffix(rest, &["now"]).unwrap_or(rest);
+    let rest = strip_target_fillers(rest);
+    if rest.is_empty() {
+        return None;
+    }
     if require_noun && !ends_with_field_noun(rest) {
         return None;
     }
@@ -1061,26 +1245,46 @@ fn ends_with_field_noun(tokens: &[String]) -> bool {
 /// `None` when the words do not ask to switch. A request for the previous
 /// window is rejected because the core contract cannot express it.
 fn parse_switch(tokens: &[String]) -> Option<Intent> {
-    let tokens = strip_phrase_suffix(tokens, &["now"]).unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
+    let tokens = strip_phrase_suffix(tokens, &["a", "bit"])
+        .or_else(|| strip_phrase_suffix(tokens, &["a", "little"]))
+        .unwrap_or(tokens);
+    let tokens = strip_trailing_politeness(tokens);
     if is_phrase(tokens, &["next", "window"]) {
         return Some(Intent::SwitchWindow { target: None });
     }
     if let Some(rest) = strip_phrase_prefix(tokens, &["switch"]) {
-        let rest = strip_phrase_prefix(rest, &["to"]).unwrap_or(rest);
-        let rest = strip_phrase_prefix(rest, &["the"]).unwrap_or(rest);
-        if rest.is_empty() {
-            return None;
+        let rest_after_to = strip_phrase_prefix(rest, &["to"]).unwrap_or(rest);
+        let rest_after_the = strip_phrase_prefix(rest_after_to, &["the"]).unwrap_or(rest_after_to);
+        if rest_after_the.is_empty() {
+            return Some(Intent::Clarify {
+                question: CLARIFY_QUESTION.to_owned(),
+            });
         }
-        if is_phrase(rest, &["window"]) || is_phrase(rest, &["next", "window"]) {
+        if is_phrase(rest, &["window"])
+            || is_phrase(rest, &["next", "window"])
+            || is_phrase(rest_after_to, &["next", "window"])
+            || is_phrase(rest_after_the, &["next", "window"])
+        {
             return Some(Intent::SwitchWindow { target: None });
         }
-        if is_phrase(rest, &["previous", "window"]) {
+        if is_phrase(rest, &["previous", "window"])
+            || is_phrase(rest_after_to, &["previous", "window"])
+            || is_phrase(rest_after_the, &["previous", "window"])
+        {
             return None;
         }
-        let target = strip_phrase_suffix(rest, &["window"]).unwrap_or(rest);
+        let target = strip_phrase_prefix(rest, &["window", "to"]).unwrap_or(rest);
+        let target = strip_phrase_prefix(target, &["window"]).unwrap_or(target);
+        let target = strip_phrase_prefix(target, &["to"]).unwrap_or(target);
         let target = strip_phrase_prefix(target, &["the"]).unwrap_or(target);
+        let target = strip_target_fillers(target);
+        let target = strip_phrase_suffix(target, &["window"]).unwrap_or(target);
+        let target = strip_target_fillers(target);
         if target.is_empty() {
-            return None;
+            return Some(Intent::Clarify {
+                question: CLARIFY_QUESTION.to_owned(),
+            });
         }
         return Some(Intent::SwitchWindow {
             target: Some(target.join(" ")),
@@ -1088,19 +1292,26 @@ fn parse_switch(tokens: &[String]) -> Option<Intent> {
     }
     if let Some(rest) = strip_phrase_prefix(tokens, &["bring"]) {
         let target = strip_phrase_suffix(rest, &["to", "the", "front"])?;
-        let target = strip_phrase_prefix(target, &["the"]).unwrap_or(target);
+        let target = strip_target_fillers(target);
         let target = strip_phrase_suffix(target, &["window"]).unwrap_or(target);
+        let target = strip_target_fillers(target);
         if target.is_empty() {
-            return None;
+            return Some(Intent::Clarify {
+                question: CLARIFY_QUESTION.to_owned(),
+            });
         }
         return Some(Intent::SwitchWindow {
             target: Some(target.join(" ")),
         });
     }
     if let Some(rest) = strip_phrase_prefix(tokens, &["activate"]) {
-        let target = strip_phrase_prefix(rest, &["the"]).unwrap_or(rest);
+        let target = strip_target_fillers(rest);
+        let target = strip_phrase_suffix(target, &["window"]).unwrap_or(target);
+        let target = strip_target_fillers(target);
         if target.is_empty() {
-            return None;
+            return Some(Intent::Clarify {
+                question: CLARIFY_QUESTION.to_owned(),
+            });
         }
         return Some(Intent::SwitchWindow {
             target: Some(target.join(" ")),
@@ -1251,6 +1462,7 @@ fn is_function_key(token: &str) -> bool {
 /// A [`ClickAttempt`] describing a valid click, an invalid target, or words
 /// that are not a click command.
 fn parse_click(tokens: &[String]) -> ClickAttempt {
+    let tokens = strip_trailing_politeness(tokens);
     let Some(rest) = strip_phrase_prefix(tokens, &["click"])
         .or_else(|| strip_phrase_prefix(tokens, &["tap"]))
         .or_else(|| strip_phrase_prefix(tokens, &["press"]))
@@ -1264,7 +1476,7 @@ fn parse_click(tokens: &[String]) -> ClickAttempt {
     let rest = strip_phrase_prefix(rest, &["the"]).unwrap_or(rest);
     let rest = strip_phrase_prefix(rest, &["a"]).unwrap_or(rest);
     let rest = strip_phrase_prefix(rest, &["an"]).unwrap_or(rest);
-    let rest = strip_phrase_suffix(rest, &["now"]).unwrap_or(rest);
+    let rest = strip_target_fillers(rest);
     if rest.is_empty() {
         return ClickAttempt::Invalid;
     }
@@ -1288,6 +1500,7 @@ fn parse_click(tokens: &[String]) -> ClickAttempt {
         };
         target = shorter;
     }
+    let target = strip_target_fillers(target);
     if target.is_empty() || is_phrase(target, &["number"]) {
         return ClickAttempt::Invalid;
     }
@@ -1379,9 +1592,12 @@ fn is_homophone(token: Option<&String>) -> bool {
 /// application name, or `None` when the target is empty or is a dotted name
 /// that is not a web address. Non-web schemes are rejected.
 fn parse_open(tokens: &[String]) -> Option<Intent> {
-    let rest = strip_phrase_prefix(tokens, &["open"])
+    let tokens = strip_trailing_politeness(tokens);
+    let rest = strip_phrase_prefix(tokens, &["open", "up"])
+        .or_else(|| strip_phrase_prefix(tokens, &["open"]))
         .or_else(|| strip_phrase_prefix(tokens, &["launch"]))
         .or_else(|| strip_phrase_prefix(tokens, &["start"]))
+        .or_else(|| strip_phrase_prefix(tokens, &["run"]))
         .or_else(|| strip_phrase_prefix(tokens, &["visit"]))
         .or_else(|| strip_phrase_prefix(tokens, &["browse"]))
         .or_else(|| strip_phrase_prefix(tokens, &["go", "to"]))?;
@@ -1390,10 +1606,11 @@ fn parse_open(tokens: &[String]) -> Option<Intent> {
     let rest = strip_phrase_prefix(rest, &["an"]).unwrap_or(rest);
     let rest = strip_phrase_prefix(rest, &["app"]).unwrap_or(rest);
     let rest = strip_phrase_prefix(rest, &["called"]).unwrap_or(rest);
+    let rest = strip_target_fillers(rest);
     let rest = strip_phrase_suffix(rest, &["app"]).unwrap_or(rest);
     let rest = strip_phrase_suffix(rest, &["application"]).unwrap_or(rest);
     let rest = strip_phrase_suffix(rest, &["program"]).unwrap_or(rest);
-    let rest = strip_phrase_suffix(rest, &["now"]).unwrap_or(rest);
+    let rest = strip_target_fillers(rest);
     if rest.is_empty() {
         return None;
     }
@@ -2300,5 +2517,307 @@ mod tests {
             failures.len(),
             failures.join("\n")
         );
+    }
+
+    /// Forgiving rule grammar parses synonyms, filler words, and number words.
+    #[test]
+    fn forgiving_synonyms_fillers_and_numbers() {
+        // Zoom in synonyms (9 cases)
+        assert_parses("make it bigger", r#"{"action":"zoom","direction":"in"}"#);
+        assert_parses(
+            "make the page bigger",
+            r#"{"action":"zoom","direction":"in"}"#,
+        );
+        assert_parses("bigger", r#"{"action":"zoom","direction":"in"}"#);
+        assert_parses("enlarge", r#"{"action":"zoom","direction":"in"}"#);
+        assert_parses("magnify", r#"{"action":"zoom","direction":"in"}"#);
+        assert_parses("bring it closer", r#"{"action":"zoom","direction":"in"}"#);
+        assert_parses(
+            "please make the page bigger",
+            r#"{"action":"zoom","direction":"in"}"#,
+        );
+        assert_parses(
+            "can you enlarge for me",
+            r#"{"action":"zoom","direction":"in"}"#,
+        );
+        assert_parses(
+            "magnify the page please",
+            r#"{"action":"zoom","direction":"in"}"#,
+        );
+
+        // Zoom out synonyms (6 cases)
+        assert_parses("make it smaller", r#"{"action":"zoom","direction":"out"}"#);
+        assert_parses(
+            "make the page smaller",
+            r#"{"action":"zoom","direction":"out"}"#,
+        );
+        assert_parses("smaller", r#"{"action":"zoom","direction":"out"}"#);
+        assert_parses("shrink", r#"{"action":"zoom","direction":"out"}"#);
+        assert_parses(
+            "would you shrink the page please",
+            r#"{"action":"zoom","direction":"out"}"#,
+        );
+        assert_parses("shrink for me", r#"{"action":"zoom","direction":"out"}"#);
+
+        // Scroll down synonyms and amount words (12 cases)
+        assert_parses(
+            "go down",
+            r#"{"action":"scroll","direction":"down","amount":null}"#,
+        );
+        assert_parses(
+            "move down",
+            r#"{"action":"scroll","direction":"down","amount":null}"#,
+        );
+        assert_parses(
+            "scroll page down",
+            r#"{"action":"scroll","direction":"down","amount":null}"#,
+        );
+        assert_parses(
+            "push the page down",
+            r#"{"action":"scroll","direction":"down","amount":null}"#,
+        );
+        assert_parses(
+            "scroll the page down",
+            r#"{"action":"scroll","direction":"down","amount":null}"#,
+        );
+        assert_parses(
+            "down a bit",
+            r#"{"action":"scroll","direction":"down","amount":1}"#,
+        );
+        assert_parses(
+            "scroll down a little",
+            r#"{"action":"scroll","direction":"down","amount":1}"#,
+        );
+        assert_parses(
+            "scroll down a lot",
+            r#"{"action":"scroll","direction":"down","amount":5}"#,
+        );
+        assert_parses(
+            "scroll down ten",
+            r#"{"action":"scroll","direction":"down","amount":10}"#,
+        );
+        assert_parses(
+            "scroll down twenty percent",
+            r#"{"action":"scroll","direction":"down","amount":20}"#,
+        );
+        assert_parses(
+            "could you please go down a bit",
+            r#"{"action":"scroll","direction":"down","amount":1}"#,
+        );
+        assert_parses(
+            "just move down a lot",
+            r#"{"action":"scroll","direction":"down","amount":5}"#,
+        );
+
+        // Scroll up synonyms and amount words (9 cases)
+        assert_parses(
+            "go up",
+            r#"{"action":"scroll","direction":"up","amount":null}"#,
+        );
+        assert_parses(
+            "move up",
+            r#"{"action":"scroll","direction":"up","amount":null}"#,
+        );
+        assert_parses(
+            "scroll page up",
+            r#"{"action":"scroll","direction":"up","amount":null}"#,
+        );
+        assert_parses(
+            "push the page up",
+            r#"{"action":"scroll","direction":"up","amount":null}"#,
+        );
+        assert_parses(
+            "scroll the page up",
+            r#"{"action":"scroll","direction":"up","amount":null}"#,
+        );
+        assert_parses(
+            "up a bit",
+            r#"{"action":"scroll","direction":"up","amount":1}"#,
+        );
+        assert_parses(
+            "scroll up a lot",
+            r#"{"action":"scroll","direction":"up","amount":5}"#,
+        );
+        assert_parses(
+            "scroll up twenty percent",
+            r#"{"action":"scroll","direction":"up","amount":20}"#,
+        );
+        assert_parses(
+            "can you push the page up for me",
+            r#"{"action":"scroll","direction":"up","amount":null}"#,
+        );
+
+        // Open app synonyms (6 cases)
+        assert_parses("launch chrome", r#"{"action":"open_app","name":"chrome"}"#);
+        assert_parses("start notepad", r#"{"action":"open_app","name":"notepad"}"#);
+        assert_parses("open up chrome", r#"{"action":"open_app","name":"chrome"}"#);
+        assert_parses("run explorer", r#"{"action":"open_app","name":"explorer"}"#);
+        assert_parses(
+            "go ahead and launch notepad please",
+            r#"{"action":"open_app","name":"notepad"}"#,
+        );
+        assert_parses(
+            "please run chrome for me",
+            r#"{"action":"open_app","name":"chrome"}"#,
+        );
+
+        // Click synonyms (9 cases)
+        assert_parses(
+            "press submit",
+            r#"{"action":"click_element","target":"submit"}"#,
+        );
+        assert_parses(
+            "hit submit",
+            r#"{"action":"click_element","target":"submit"}"#,
+        );
+        assert_parses(
+            "tap submit",
+            r#"{"action":"click_element","target":"submit"}"#,
+        );
+        assert_parses(
+            "select submit",
+            r#"{"action":"click_element","target":"submit"}"#,
+        );
+        assert_parses(
+            "click submit for me",
+            r#"{"action":"click_element","target":"submit"}"#,
+        );
+        assert_parses(
+            "press the save button please",
+            r#"{"action":"click_element","target":"save"}"#,
+        );
+        assert_parses(
+            "hit the submit button now",
+            r#"{"action":"click_element","target":"submit"}"#,
+        );
+        assert_parses(
+            "click the banana",
+            r#"{"action":"click_element","target":"banana"}"#,
+        );
+        assert_parses(
+            "just tap the login button",
+            r#"{"action":"click_element","target":"login"}"#,
+        );
+
+        // Focus field synonyms (7 cases)
+        assert_parses(
+            "go to the email field",
+            r#"{"action":"focus_field","target":"email"}"#,
+        );
+        assert_parses(
+            "select the username box",
+            r#"{"action":"focus_field","target":"username"}"#,
+        );
+        assert_parses(
+            "focus search",
+            r#"{"action":"focus_field","target":"search"}"#,
+        );
+        assert_parses(
+            "click on the search field",
+            r#"{"action":"focus_field","target":"search"}"#,
+        );
+        assert_parses(
+            "click on the full name field",
+            r#"{"action":"focus_field","target":"full name"}"#,
+        );
+        assert_parses(
+            "select the search box for me",
+            r#"{"action":"focus_field","target":"search"}"#,
+        );
+        assert_parses(
+            "click the username field",
+            r#"{"action":"focus_field","target":"username"}"#,
+        );
+
+        // Type text synonyms (6 cases)
+        assert_parses(
+            "type Jinwoo",
+            r#"{"action":"type_text","text":"Jinwoo","field":null}"#,
+        );
+        assert_parses(
+            "write Reach rocks",
+            r#"{"action":"type_text","text":"Reach rocks","field":null}"#,
+        );
+        assert_parses(
+            "enter Jinwoo Sung",
+            r#"{"action":"type_text","text":"Jinwoo Sung","field":null}"#,
+        );
+        assert_parses(
+            "put Jinwoo in the full name field",
+            r#"{"action":"type_text","text":"Jinwoo","field":"full name"}"#,
+        );
+        assert_parses(
+            "put Hello in the search box",
+            r#"{"action":"type_text","text":"Hello","field":"search"}"#,
+        );
+        assert_parses(
+            "enter test into the email field",
+            r#"{"action":"type_text","text":"test","field":"email"}"#,
+        );
+
+        // Switch window exact cases and empty targets (5 cases)
+        assert_parses(
+            "switch window to banana",
+            r#"{"action":"switch_window","target":"banana"}"#,
+        );
+        assert_parses(
+            "switch to chrome",
+            r#"{"action":"switch_window","target":"chrome"}"#,
+        );
+        assert_parses(
+            "switch window to the banana",
+            r#"{"action":"switch_window","target":"banana"}"#,
+        );
+        assert_parses(
+            "switch to",
+            r#"{"action":"clarify","question":"I didn't catch that, could you say it another way?"}"#,
+        );
+        assert_parses(
+            "switch window to",
+            r#"{"action":"clarify","question":"I didn't catch that, could you say it another way?"}"#,
+        );
+    }
+
+    /// Negative cases that must not match a command.
+    #[test]
+    fn negative_utterances_do_not_match_command() {
+        assert_no_match("what's the weather");
+        assert_no_match("I'll call you in five minutes");
+        assert_no_match("the volume of sales went up");
+        assert_no_match("hello how are you");
+        assert_no_match("Okay reach dance good");
+        assert_no_match("good morning reach");
+        assert_no_match("why is the sky blue");
+        assert_no_match("tell me a joke");
+        assert_no_match("how do I bake a cake");
+        assert_no_match("this is not a command");
+        assert_no_match("can you believe what happened yesterday");
+        assert_no_match("the price went down by ten dollars");
+        assert_no_match("we need to zoom our camera");
+        assert_no_match("she loves to read books");
+        assert_no_match("open the door for me");
+        assert_no_match("I want to eat an apple");
+    }
+
+    /// Synonyms never produce Confirm, Deny or Cancel.
+    #[test]
+    fn synonyms_never_produce_confirm_or_deny() {
+        let commands = [
+            "bigger",
+            "smaller",
+            "enlarge",
+            "shrink",
+            "go down",
+            "go up",
+            "launch chrome",
+            "press submit",
+            "focus search",
+        ];
+        for cmd in commands {
+            let res = parse_rule(cmd);
+            assert_ne!(res, Some(Intent::Confirm));
+            assert_ne!(res, Some(Intent::Deny));
+            assert_ne!(res, Some(Intent::Cancel));
+        }
     }
 }
