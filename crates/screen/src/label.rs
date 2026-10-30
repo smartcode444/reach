@@ -90,10 +90,14 @@ pub struct MatchConfig {
 }
 
 impl Default for MatchConfig {
-    /// Default thresholds: minimum score of 0.65 and ambiguity margin of 0.05.
+    /// Default thresholds: minimum score of 0.70 and ambiguity margin of 0.05.
+    ///
+    /// 0.70 rejects fuzzy noise such as "name" against "Home" (0.67) or
+    /// "Managed bookmarks" (0.66), while still accepting a whole-word
+    /// containment match such as "name" against "Full Name" (0.82).
     fn default() -> Self {
         Self {
-            min_score: 0.65,
+            min_score: 0.70,
             ambiguity_margin: 0.05,
         }
     }
@@ -463,5 +467,71 @@ mod tests {
         let matches = rank_matches("Name", &elements, None);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].index, 0);
+    }
+
+    /// "name" must not fuzzy-match Chrome's Home button.
+    #[test]
+    fn name_does_not_match_home() {
+        let elements = vec![make_element("Home", ControlKind::Button)];
+        let matches = rank_matches("name", &elements, None);
+        let resolution = resolve(&matches, &MatchConfig::default());
+        assert_eq!(resolution, Resolution::NotFound, "matches: {matches:?}");
+    }
+
+    /// "name" must not fuzzy-match Chrome's Managed bookmarks folder.
+    #[test]
+    fn name_does_not_match_managed_bookmarks() {
+        let elements = vec![make_element("Managed bookmarks", ControlKind::MenuItem)];
+        let matches = rank_matches("name", &elements, None);
+        let resolution = resolve(&matches, &MatchConfig::default());
+        assert_eq!(resolution, Resolution::NotFound, "matches: {matches:?}");
+    }
+
+    /// On a Chrome-shaped screen, "name" must only match the Full Name field,
+    /// never the Home button or the Managed bookmarks folder.
+    #[test]
+    fn name_matches_only_the_full_name_field_on_the_demo_form() {
+        let elements = vec![
+            make_element("Home", ControlKind::Button),
+            make_element("Managed bookmarks", ControlKind::MenuItem),
+            make_element("Full Name", ControlKind::Edit),
+            make_element("Email", ControlKind::Edit),
+            make_element("Matric Number", ControlKind::Edit),
+            make_element("Submit", ControlKind::Button),
+        ];
+        let matches = rank_matches("name", &elements, None);
+        let cfg = MatchConfig::default();
+        let accepted: Vec<usize> = matches
+            .iter()
+            .filter(|m| m.score >= cfg.min_score)
+            .map(|m| m.index)
+            .collect();
+        assert_eq!(
+            accepted,
+            vec![2],
+            "Home or Managed bookmarks passed the threshold: {matches:?}"
+        );
+        assert_eq!(resolve(&matches, &cfg), Resolution::Unique(2));
+    }
+
+    /// The demo form's field labels resolve to their own fields.
+    #[test]
+    fn demo_form_labels_resolve_to_their_fields() {
+        let elements = vec![
+            make_element("Home", ControlKind::Button),
+            make_element("Managed bookmarks", ControlKind::MenuItem),
+            make_element("Full Name", ControlKind::Edit),
+            make_element("Email", ControlKind::Edit),
+            make_element("Matric Number", ControlKind::Edit),
+            make_element("Submit", ControlKind::Button),
+        ];
+        for (query, expected) in [("full name", 2), ("email", 3), ("matric number", 4)] {
+            let matches = rank_matches(query, &elements, None);
+            assert_eq!(
+                resolve(&matches, &MatchConfig::default()),
+                Resolution::Unique(expected),
+                "query {query:?} matches: {matches:?}"
+            );
+        }
     }
 }

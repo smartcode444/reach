@@ -22,47 +22,97 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Default number of scroll increments when unspecified.
 pub const DEFAULT_SCROLL_STEPS: i32 = 3;
 
+/// A sink that accepts individual key events.
+///
+/// Production uses [`Enigo`]; tests use a recorder so the exact sequence of
+/// press, click and release events can be asserted without touching the desktop.
+pub trait KeySink {
+    /// Sends one key event in the requested direction.
+    ///
+    /// # Arguments
+    /// * `key` - The key to send.
+    /// * `direction` - Whether to press, release or click the key.
+    ///
+    /// # Errors
+    /// Returns a message when the platform injector rejects the event.
+    fn send_key(&mut self, key: EnigoKey, direction: EnigoDirection) -> Result<(), String>;
+}
+
+impl KeySink for Enigo {
+    /// Forwards one key event to the platform injector.
+    fn send_key(&mut self, key: EnigoKey, direction: EnigoDirection) -> Result<(), String> {
+        Keyboard::key(self, key, direction).map_err(|e| e.to_string())
+    }
+}
+
 /// Guard that ensures a held modifier key is released when dropped or on panic.
-pub struct ModifierGuard<'a> {
-    /// Mutable reference to the Enigo input injector.
-    enigo: &'a mut Enigo,
+pub struct ModifierGuard<'a, S: KeySink> {
+    /// Mutable reference to the key sink.
+    sink: &'a mut S,
     /// The modifier key to release on drop.
     key: EnigoKey,
     /// Whether the guard is actively holding down the modifier.
     active: bool,
 }
 
-impl<'a> ModifierGuard<'a> {
+impl<'a, S: KeySink> ModifierGuard<'a, S> {
     /// Presses `key` and arms the guard to release it on drop.
     ///
     /// # Arguments
-    /// * `enigo` - Mutable reference to the Enigo input injector.
+    /// * `sink` - The sink that receives the press and the eventual release.
     /// * `key` - The modifier key to press.
     ///
     /// # Returns
     /// An armed `ModifierGuard` if key press succeeded.
     ///
     /// # Errors
-    /// Returns error string if input injection failed.
-    pub fn press(enigo: &'a mut Enigo, key: EnigoKey) -> Result<Self, String> {
-        enigo
-            .key(key, EnigoDirection::Press)
+    /// Returns a contextualised error if the modifier press failed.
+    pub fn press(sink: &'a mut S, key: EnigoKey) -> Result<Self, String> {
+        sink.send_key(key, EnigoDirection::Press)
             .map_err(|e| format!("failed to press modifier key: {e}"))?;
         Ok(Self {
-            enigo,
+            sink,
             key,
             active: true,
         })
     }
 }
 
-impl Drop for ModifierGuard<'_> {
+impl<S: KeySink> Drop for ModifierGuard<'_, S> {
+    /// Releases the held modifier, ignoring release errors.
     fn drop(&mut self) {
         if self.active {
-            let _ = self.enigo.key(self.key, EnigoDirection::Release);
+            let _ = self.sink.send_key(self.key, EnigoDirection::Release);
             self.active = false;
         }
     }
+}
+
+/// Presses `key` while `modifier` is held, always releasing the modifier.
+///
+/// # Arguments
+/// * `sink` - The sink that receives the events.
+/// * `modifier` - The modifier to hold, usually Ctrl.
+/// * `key` - The key to click while the modifier is held.
+///
+/// # Returns
+/// `Ok(())` after the click and the modifier release.
+///
+/// # Errors
+/// Returns a contextualised error if the modifier press or the key click
+/// fails. The modifier is still released when the key click fails.
+fn press_with_modifier<S: KeySink>(
+    sink: &mut S,
+    modifier: EnigoKey,
+    key: EnigoKey,
+) -> Result<(), String> {
+    let guard = ModifierGuard::press(sink, modifier)?;
+    guard
+        .sink
+        .send_key(key, EnigoDirection::Click)
+        .map_err(|e| format!("failed to click key: {e}"))?;
+    drop(guard);
+    Ok(())
 }
 
 /// Flag tracking whether the global panic hook has been registered.
@@ -370,6 +420,33 @@ pub fn open_app(name: &str) -> Result<String, String> {
     }
 }
 
+/// Sends the browser zoom shortcut for `direction`.
+///
+/// Chrome expects Ctrl and the unshifted `=` key for zoom in. Sending
+/// `Key::Unicode('+')` fails on Windows because `VkKeyScanExW` puts the Shift
+/// state in the high byte of the virtual key and enigo passes that whole value
+/// through as an invalid key code. On the default US layout the unshifted `=`
+/// maps to `VK_OEM_PLUS` without the Shift bit, while Ctrl + `-` and Ctrl + `0`
+/// need no Shift.
+///
+/// # Arguments
+/// * `sink` - The sink that receives the key sequence.
+/// * `direction` - Which zoom shortcut to send.
+///
+/// # Returns
+/// `Ok(())` after the shortcut has been sent.
+///
+/// # Errors
+/// Returns the sink's error if any event in the sequence fails.
+fn send_zoom<S: KeySink>(sink: &mut S, direction: ZoomDir) -> Result<(), String> {
+    let key = match direction {
+        ZoomDir::In => EnigoKey::Unicode('='),
+        ZoomDir::Out => EnigoKey::Unicode('-'),
+        ZoomDir::Reset => EnigoKey::Unicode('0'),
+    };
+    press_with_modifier(sink, EnigoKey::Control, key)
+}
+
 /// Executor for global computer actions: key presses, scrolling, zooming, and opening apps/URLs.
 pub struct GlobalExecutor {
     /// Underlying platform input injector.
@@ -389,17 +466,6 @@ impl GlobalExecutor {
         let enigo = Enigo::new(&Settings::default())
             .map_err(|e| format!("failed to initialize enigo: {e}"))?;
         Ok(Self { enigo })
-    }
-
-    /// Presses a key with a modifier held down, guaranteed to release the modifier.
-    fn press_with_modifier(&mut self, modifier: EnigoKey, key: EnigoKey) -> Result<(), String> {
-        let guard = ModifierGuard::press(&mut self.enigo, modifier)?;
-        guard
-            .enigo
-            .key(key, EnigoDirection::Click)
-            .map_err(|e| format!("failed to click key: {e}"))?;
-        drop(guard);
-        Ok(())
     }
 }
 
@@ -433,20 +499,15 @@ impl Executor for GlobalExecutor {
                     length.abs()
                 ))
             }
-            Intent::Zoom { direction } => match direction {
-                ZoomDir::In => {
-                    self.press_with_modifier(EnigoKey::Control, EnigoKey::Unicode('+'))?;
-                    Ok("zoomed in".to_owned())
+            Intent::Zoom { direction } => {
+                send_zoom(&mut self.enigo, *direction)?;
+                Ok(match direction {
+                    ZoomDir::In => "zoomed in",
+                    ZoomDir::Out => "zoomed out",
+                    ZoomDir::Reset => "reset zoom",
                 }
-                ZoomDir::Out => {
-                    self.press_with_modifier(EnigoKey::Control, EnigoKey::Unicode('-'))?;
-                    Ok("zoomed out".to_owned())
-                }
-                ZoomDir::Reset => {
-                    self.press_with_modifier(EnigoKey::Control, EnigoKey::Unicode('0'))?;
-                    Ok("reset zoom".to_owned())
-                }
-            },
+                .to_owned())
+            }
             Intent::OpenApp { name } => open_app(name),
             Intent::OpenUrl { url } => open_url(url),
             unhandled => Err(format!(
@@ -486,6 +547,84 @@ mod tests {
         assert_eq!(map_scroll(Direction::Up, Some(5)), (-5, Axis::Vertical));
         assert_eq!(map_scroll(Direction::Right, Some(2)), (2, Axis::Horizontal));
         assert_eq!(map_scroll(Direction::Left, None), (-3, Axis::Horizontal));
+    }
+
+    /// Records every key event so the zoom sequence can be asserted.
+    #[derive(Debug, Default)]
+    struct RecordingKeySink {
+        /// Events in the order they were sent.
+        events: Vec<(EnigoKey, EnigoDirection)>,
+    }
+
+    impl KeySink for RecordingKeySink {
+        /// Records one key event.
+        fn send_key(&mut self, key: EnigoKey, direction: EnigoDirection) -> Result<(), String> {
+            self.events.push((key, direction));
+            Ok(())
+        }
+    }
+
+    /// Zoom in must send Ctrl plus the unshifted equals key, then release Ctrl.
+    #[test]
+    fn zoom_in_sends_ctrl_and_unshifted_equals() {
+        let mut sink = RecordingKeySink::default();
+        send_zoom(&mut sink, ZoomDir::In).unwrap();
+        assert_eq!(
+            sink.events,
+            vec![
+                (EnigoKey::Control, EnigoDirection::Press),
+                (EnigoKey::Unicode('='), EnigoDirection::Click),
+                (EnigoKey::Control, EnigoDirection::Release),
+            ]
+        );
+    }
+
+    /// Zoom out must keep Ctrl plus minus, then release Ctrl.
+    #[test]
+    fn zoom_out_sends_ctrl_and_minus() {
+        let mut sink = RecordingKeySink::default();
+        send_zoom(&mut sink, ZoomDir::Out).unwrap();
+        assert_eq!(
+            sink.events,
+            vec![
+                (EnigoKey::Control, EnigoDirection::Press),
+                (EnigoKey::Unicode('-'), EnigoDirection::Click),
+                (EnigoKey::Control, EnigoDirection::Release),
+            ]
+        );
+    }
+
+    /// Zoom reset must keep Ctrl plus zero, then release Ctrl.
+    #[test]
+    fn zoom_reset_sends_ctrl_and_zero() {
+        let mut sink = RecordingKeySink::default();
+        send_zoom(&mut sink, ZoomDir::Reset).unwrap();
+        assert_eq!(
+            sink.events,
+            vec![
+                (EnigoKey::Control, EnigoDirection::Press),
+                (EnigoKey::Unicode('0'), EnigoDirection::Click),
+                (EnigoKey::Control, EnigoDirection::Release),
+            ]
+        );
+    }
+
+    /// Manual check that the real shortcuts change Chrome's zoom level.
+    ///
+    /// Open Chrome, note the page zoom, then run:
+    /// `cargo test -p exec zoom_shortcuts_manually -- --ignored --nocapture`
+    /// and watch the page zoom in, out and reset.
+    #[test]
+    #[ignore = "touches the real desktop; run manually with Chrome focused"]
+    fn zoom_shortcuts_manually() {
+        let mut exec = GlobalExecutor::new().expect("failed to initialize executor");
+        for direction in [ZoomDir::In, ZoomDir::Out, ZoomDir::Reset] {
+            let message = exec
+                .run(&Intent::Zoom { direction })
+                .expect("zoom shortcut failed");
+            println!("{message}");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
     }
 
     /// Tests executor rejects unhandled element intents.
