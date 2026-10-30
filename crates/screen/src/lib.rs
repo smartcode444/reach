@@ -4,7 +4,9 @@
 
 pub mod element;
 pub mod error;
+pub mod grid;
 pub mod label;
+pub mod snapshot;
 
 pub use element::{
     ActionMethod, ActionOutcome, CollectLimits, CollectResult, CollectionRoot, ForegroundFinder,
@@ -13,7 +15,15 @@ pub use element::{
     type_text_in,
 };
 pub use error::ScreenError;
+pub use grid::{
+    GridError, GridOutcome, GridState, MAX_GRID_LEVEL, cell_rect, get_foreground_window_rect,
+    grid_cells,
+};
 pub use label::{
     ControlKind, ElementSummary, Match, MatchConfig, Rect, Resolution, normalise_label,
     rank_matches, resolve,
+};
+pub use snapshot::{
+    NumberClickOutcome, NumberedElement, NumberedSnapshot, click_number, is_clickable,
+    numbered_snapshot,
 };

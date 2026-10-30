@@ -8,13 +8,16 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod executor;
+pub mod overlay;
 pub mod pipeline;
 pub mod status;
 pub mod worker;
 
 pub use executor::CompositeExecutor;
+pub use overlay::{NumberedBadge, OverlayEvent, build_grid_overlay_event};
 pub use pipeline::{
     DisabledModel, Pipeline, PipelineIo, PipelineModel, StepOutcome, format_intent_action,
 };
+pub use screen::Rect;
 pub use status::{ErrorKind, StatusEvent};
 pub use worker::{WorkerEnd, run_worker};
