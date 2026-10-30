@@ -9,6 +9,7 @@
 pub mod executor;
 pub mod listen;
 pub mod pipeline;
+pub mod speaker;
 
 use std::io;
 use std::time::Instant;

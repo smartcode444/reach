@@ -6,7 +6,7 @@
 //! prints the transcript.
 
 use std::io::{self, BufRead, Write};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nlu::tools::ToolSpec;
 use nlu::wake::{GateResult, WakeConfig, WakeSession};
@@ -161,6 +161,14 @@ pub struct Pipeline<M, E> {
     executor: E,
     /// When true, routes are printed as JSON and nothing runs.
     dry_run: bool,
+    /// Duration of the most recent rule parse and routing decision.
+    last_route_duration: Duration,
+    /// Duration of the most recent rule grammar evaluation.
+    last_rules_duration: Duration,
+    /// Duration of the most recent Needle model inference, if any.
+    last_needle_duration: Duration,
+    /// Duration of the most recent intent execution, if any.
+    last_execute_duration: Duration,
 }
 
 impl<M, E> Pipeline<M, E> {
@@ -179,7 +187,67 @@ impl<M, E> Pipeline<M, E> {
             model,
             executor,
             dry_run,
+            last_route_duration: Duration::ZERO,
+            last_rules_duration: Duration::ZERO,
+            last_needle_duration: Duration::ZERO,
+            last_execute_duration: Duration::ZERO,
         }
+    }
+
+    /// Returns the duration of the most recent rule parse and routing decision.
+    ///
+    /// # Returns
+    /// The [`Duration`] spent evaluating the wake gate, grammar rules, and model.
+    pub fn last_route_duration(&self) -> Duration {
+        self.last_route_duration
+    }
+
+    /// Returns the duration of the most recent rule grammar evaluation.
+    ///
+    /// # Returns
+    /// The [`Duration`] spent matching the rule grammar.
+    pub fn last_rules_duration(&self) -> Duration {
+        self.last_rules_duration
+    }
+
+    /// Returns the duration of the most recent Needle model inference.
+    ///
+    /// # Returns
+    /// The [`Duration`] spent in Needle inference, or zero if rules matched or no model was queried.
+    pub fn last_needle_duration(&self) -> Duration {
+        self.last_needle_duration
+    }
+
+    /// Evaluates the rule grammar first, then Needle if rules miss, recording per-stage timings.
+    ///
+    /// # Arguments
+    /// * `command` - The command string stripped of the wake word.
+    ///
+    /// # Returns
+    /// The computed [`Route`].
+    pub fn route_command(&mut self, command: &str) -> Route {
+        let rules_start = Instant::now();
+        let rule_match = nlu::parse_rule(command);
+        self.last_rules_duration = rules_start.elapsed();
+
+        if let Some(intent) = rule_match {
+            nlu::route_rule_intent(intent)
+        } else {
+            let needle_start = Instant::now();
+            let tools = nlu::tool_specs();
+            let reply = self.model.infer(command, &tools);
+            self.last_needle_duration = needle_start.elapsed();
+            nlu::route_model_reply(command, reply)
+        }
+    }
+
+    /// Returns the duration of the most recent intent execution.
+    ///
+    /// # Returns
+    /// The [`Duration`] spent inside the executor's `run` method, or zero if no
+    /// intent was executed.
+    pub fn last_execute_duration(&self) -> Duration {
+        self.last_execute_duration
     }
 
     /// Returns the executor so tests can inspect what ran.
@@ -221,11 +289,23 @@ impl<M: IntentModel, E: Executor> Pipeline<M, E> {
         now: Instant,
         io: &mut PipelineIo<'_>,
     ) -> io::Result<()> {
+        self.last_route_duration = Duration::ZERO;
+        self.last_rules_duration = Duration::ZERO;
+        self.last_needle_duration = Duration::ZERO;
+        self.last_execute_duration = Duration::ZERO;
+        let route_start = Instant::now();
         match self.session.evaluate(transcript, now) {
-            GateResult::Ignored => writeln!(io.output, "ignored"),
-            GateResult::WakeOnly => writeln!(io.output, "listening"),
+            GateResult::Ignored => {
+                self.last_route_duration = route_start.elapsed();
+                writeln!(io.output, "ignored")
+            }
+            GateResult::WakeOnly => {
+                self.last_route_duration = route_start.elapsed();
+                writeln!(io.output, "listening")
+            }
             GateResult::Command(command) => {
-                let route = route_utterance(&command, &mut self.model);
+                let route = self.route_command(&command);
+                self.last_route_duration = route_start.elapsed();
                 self.handle_route(route, io)
             }
         }
@@ -264,7 +344,7 @@ impl<M: IntentModel, E: Executor> Pipeline<M, E> {
             GateResult::Command(command) => command,
         };
 
-        let route = route_utterance(&command, &mut self.model);
+        let route = self.route_command(&command);
         let chosen_intent = match &route {
             Route::Run(intent) | Route::Confirm(intent) => Some(intent.clone()),
             _ => None,
@@ -389,7 +469,10 @@ impl<M: IntentModel, E: Executor> Pipeline<M, E> {
     /// # Errors
     /// Returns an I/O error when writing the result fails.
     fn execute(&mut self, intent: &Intent, io: &mut PipelineIo<'_>) -> io::Result<()> {
-        match self.executor.run(intent) {
+        let exec_start = Instant::now();
+        let result = self.executor.run(intent);
+        self.last_execute_duration = exec_start.elapsed();
+        match result {
             Ok(message) => writeln!(io.output, "{message}"),
             Err(error) => writeln!(io.output, "execution failed: {error}"),
         }

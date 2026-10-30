@@ -21,6 +21,7 @@ use stt::{SttConfig, SttError, Transcriber, clean_transcript};
 
 use crate::executor::CompositeExecutor;
 use crate::pipeline::{Pipeline, PipelineIo};
+use crate::speaker::{NullSpeaker, Phrase, Speaker, TtsSpeaker};
 
 /// The Whisper model loaded when `--stt-model` is not supplied.
 pub const DEFAULT_STT_MODEL_PATH: &str = "models/ggml-base.en.bin";
@@ -45,6 +46,8 @@ pub struct ListenArgs {
     pub dry_run: bool,
     /// Path to the Whisper GGML model, if explicitly provided.
     pub stt_model: Option<String>,
+    /// Whether to disable voice output.
+    pub no_voice: bool,
 }
 
 /// Parses the arguments following the `listen` subcommand.
@@ -65,6 +68,7 @@ pub fn parse_listen_args(args: &[String]) -> Result<ListenArgs, String> {
     let mut captions = false;
     let mut dry_run = false;
     let mut stt_model = None;
+    let mut no_voice = false;
 
     let mut index = 0;
     while index < args.len() {
@@ -86,6 +90,8 @@ pub fn parse_listen_args(args: &[String]) -> Result<ListenArgs, String> {
             if !path.is_empty() {
                 model_path = Some(path.to_owned());
             }
+        } else if argument == "--no-voice" {
+            no_voice = true;
         } else if argument == "--captions" {
             captions = true;
         } else if argument == "--dry-run" {
@@ -117,6 +123,7 @@ pub fn parse_listen_args(args: &[String]) -> Result<ListenArgs, String> {
         captions,
         dry_run,
         stt_model,
+        no_voice,
     })
 }
 
@@ -184,41 +191,99 @@ impl Drop for PauseGuard<'_> {
     }
 }
 
-/// Writes feedback while pausing the microphone.
+/// Writes feedback while pausing the microphone and speaking feedback phrases.
 ///
-/// Until a speech-output implementation exists, writing the feedback to stdout
-/// is the announcement hook. Wrapping every write in a pause keeps the
-/// microphone from capturing Reach's own output.
+/// Output lines written to this writer are displayed on `inner` and, if they
+/// match a known feedback phrase, spoken aloud through `speaker` while pausing
+/// microphone capture. Microphone capture resumes 200 ms after speech concludes
+/// so Reach never captures its own voice.
 pub struct FeedbackWriter<W: Write> {
     /// The stream that receives the feedback.
     inner: W,
-    /// The capture handle paused around each write.
+    /// The capture handle paused around each write and speech output.
     control: Box<dyn CaptureControl>,
+    /// The speaker that announces feedback.
+    speaker: Box<dyn Speaker>,
+    /// Internal line buffer to detect complete lines for speech output.
+    buffer: String,
 }
 
 impl<W: Write> FeedbackWriter<W> {
-    /// Creates a feedback writer around `inner`.
+    /// Creates a feedback writer around `inner`, `control`, and `speaker`.
     ///
     /// # Arguments
     /// * `inner` - The stream that receives user-facing feedback.
-    /// * `control` - The capture handle paused while feedback is written.
+    /// * `control` - The capture handle paused while feedback is written or spoken.
+    /// * `speaker` - The speaker engine used for spoken feedback.
     ///
     /// # Returns
     /// An initialized [`FeedbackWriter`].
-    pub fn new(inner: W, control: Box<dyn CaptureControl>) -> Self {
-        Self { inner, control }
+    pub fn new(inner: W, control: Box<dyn CaptureControl>, speaker: Box<dyn Speaker>) -> Self {
+        Self {
+            inner,
+            control,
+            speaker,
+            buffer: String::new(),
+        }
+    }
+
+    /// Speaks `phrase`, pausing capture during speech and waiting 200 ms after speech ends.
+    ///
+    /// # Arguments
+    /// * `phrase` - The closed phrase to speak.
+    pub fn speak(&mut self, phrase: Phrase) {
+        let _guard = PauseGuard::new(self.control.as_ref());
+        if let Err(_error) = self.speaker.speak(phrase) {
+            // Degrade to silent output; do not crash the loop.
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    /// Accesses the underlying speaker for testing.
+    ///
+    /// # Returns
+    /// A reference to the [`Speaker`] trait object.
+    pub fn speaker(&self) -> &dyn Speaker {
+        self.speaker.as_ref()
     }
 }
 
 impl<W: Write> Write for FeedbackWriter<W> {
-    /// Writes feedback with the microphone paused.
+    /// Writes feedback with the microphone paused and speaks detected phrases.
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let _guard = PauseGuard::new(self.control.as_ref());
-        self.inner.write(buffer)
+        let written = self.inner.write(buffer)?;
+
+        if let Ok(text) = std::str::from_utf8(&buffer[..written]) {
+            self.buffer.push_str(text);
+            while let Some(pos) = self.buffer.find('\n') {
+                let line = self.buffer[..pos].trim().to_owned();
+                self.buffer.drain(..=pos);
+                if let Some(phrase) = crate::speaker::phrase_from_line(&line) {
+                    if let Err(_error) = self.speaker.speak(phrase) {
+                        // Degrade to silent output; do not crash the loop.
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+
+        Ok(written)
     }
 
     /// Flushes the underlying stream without pausing capture.
     fn flush(&mut self) -> io::Result<()> {
+        let _guard = PauseGuard::new(self.control.as_ref());
+        if !self.buffer.is_empty() {
+            let line = self.buffer.trim().to_owned();
+            self.buffer.clear();
+            if let Some(phrase) = crate::speaker::phrase_from_line(&line) {
+                if let Err(_error) = self.speaker.speak(phrase) {
+                    // Degrade to silent output; do not crash the loop.
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
         self.inner.flush()
     }
 }
@@ -449,6 +514,10 @@ pub struct VoiceUtterance {
     /// Estimated end of speech, derived by subtracting the endpointer's
     /// trailing-silence window from the moment the utterance was emitted.
     pub speech_ended: Instant,
+    /// Time spent waiting for trailing silence before emitting the utterance.
+    pub endpoint_wait: Duration,
+    /// Time taken to transcribe the audio into text.
+    pub transcription_time: Duration,
 }
 
 /// The voice-backed input consumed by the pipeline.
@@ -550,13 +619,19 @@ impl VoiceInput {
             match self.frames.next_frame(wait) {
                 FramePoll::Frame(frame) => {
                     if let Some(utterance) = self.endpointer.push_frame(&frame) {
-                        let speech_ended = Instant::now()
+                        let now = Instant::now();
+                        let speech_ended = now
                             .checked_sub(self.trailing_silence)
-                            .unwrap_or_else(Instant::now);
+                            .unwrap_or(now);
+                        let endpoint_wait = now.saturating_duration_since(speech_ended);
+                        let transcribe_start = Instant::now();
                         if let Some(heard) = self.stt.transcribe(&utterance.samples)? {
+                            let transcription_time = transcribe_start.elapsed();
                             return Ok(Some(VoiceUtterance {
                                 heard,
                                 speech_ended,
+                                endpoint_wait,
+                                transcription_time,
                             }));
                         }
                     }
@@ -641,10 +716,7 @@ where
     M: nlu::IntentModel,
     E: reach_core::Executor,
 {
-    loop {
-        let Some(input) = voice.next_utterance(None)? else {
-            break;
-        };
+    while let Some(input) = voice.next_utterance(None)? {
 
         if captions {
             writeln!(feedback, "heard: {}", input.heard.text)
@@ -663,8 +735,16 @@ where
 
         if captions {
             let latency = Instant::now().saturating_duration_since(input.speech_ended);
-            writeln!(feedback, "latency: {} ms", latency.as_millis())
-                .map_err(|error| format!("could not write latency: {error}"))?;
+            writeln!(
+                feedback,
+                "latency: {} ms (endpoint wait: {} ms, transcription time: {} ms, parse/route time: {} ms, execute time: {} ms)",
+                latency.as_millis(),
+                input.endpoint_wait.as_millis(),
+                input.transcription_time.as_millis(),
+                pipeline.last_route_duration().as_millis(),
+                pipeline.last_execute_duration().as_millis(),
+            )
+            .map_err(|error| format!("could not write latency: {error}"))?;
         }
     }
 
@@ -716,7 +796,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
     )?;
 
     let stdout = io::stdout();
-    let mut feedback = FeedbackWriter::new(stdout.lock(), Box::new(control));
+    let speaker: Box<dyn Speaker> = if parsed.no_voice {
+        Box::new(NullSpeaker::new())
+    } else {
+        match TtsSpeaker::new() {
+            Ok(speaker) => Box::new(speaker),
+            Err(_) => Box::new(NullSpeaker::new()),
+        }
+    };
+    let mut feedback = FeedbackWriter::new(stdout.lock(), Box::new(control), speaker);
     let result = run_loop(&mut pipeline, &mut voice, &mut feedback, parsed.captions);
     exec::release_all_keys();
     result
@@ -761,6 +849,7 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> windows::core::BOOL {
 /// Unit tests for voice mode.
 #[cfg(test)]
 mod tests {
+    use crate::speaker::ActionLabel;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -901,6 +990,8 @@ mod tests {
         pause_count: usize,
         /// Number of resume calls.
         resume_count: usize,
+        /// Phrases spoken through the speaker.
+        phrases: Vec<Phrase>,
     }
 
     /// Returns a fast endpointing configuration for the scripted frames.
@@ -969,8 +1060,10 @@ mod tests {
         );
 
         let mut output = Vec::new();
+        let speaker = NullSpeaker::new();
+        let recorded = speaker.clone();
         {
-            let mut feedback = FeedbackWriter::new(&mut output, Box::new(control.clone()));
+            let mut feedback = FeedbackWriter::new(&mut output, Box::new(control.clone()), Box::new(speaker));
             run_loop(&mut pipeline, &mut voice, &mut feedback, captions)
                 .expect("the scripted pipeline must finish");
         }
@@ -981,6 +1074,7 @@ mod tests {
             output: String::from_utf8(output).expect("feedback must be valid UTF-8"),
             pause_count: control.pause_count(),
             resume_count: control.resume_count(),
+            phrases: recorded.phrases(),
         }
     }
 
@@ -1168,7 +1262,33 @@ mod tests {
 
         assert!(result.output.contains("heard: Reach scroll down"));
         assert!(result.output.contains("latency:"));
+        assert!(result.output.contains("endpoint wait:"));
+        assert!(result.output.contains("transcription time:"));
+        assert!(result.output.contains("parse/route time:"));
+        assert!(result.output.contains("execute time:"));
         assert!(result.output.contains(" ms"));
+    }
+
+    /// Captions print latency broken down into endpoint wait, transcription, parse/route and execute time.
+    #[test]
+    fn captions_print_latency_breakdown_metrics() {
+        let result = run_script(
+            utterance_frames(),
+            vec![Some("Reach scroll down")],
+            Duration::ZERO,
+            true,
+        );
+
+        let latency_line = result
+            .output
+            .lines()
+            .find(|line| line.starts_with("latency:"))
+            .expect("latency line must be present");
+
+        assert!(latency_line.contains("endpoint wait:"));
+        assert!(latency_line.contains("transcription time:"));
+        assert!(latency_line.contains("parse/route time:"));
+        assert!(latency_line.contains("execute time:"));
     }
 
     /// Without captions, the transcript is never printed.
@@ -1226,5 +1346,72 @@ mod tests {
     fn rejects_unknown_options_and_positional_words() {
         assert!(parse_listen_args(&["--microphone".to_owned()]).is_err());
         assert!(parse_listen_args(&["scroll".to_owned()]).is_err());
+    }
+
+    /// Verifies the --no-voice option is parsed.
+    #[test]
+    fn parses_no_voice_option() {
+        let args = parse_listen_args(&["--no-voice".to_owned()]).unwrap();
+        assert!(args.no_voice);
+
+        let default_args = parse_listen_args(&[]).unwrap();
+        assert!(!default_args.no_voice);
+    }
+
+    /// Tests that voice feedback records listening and done phrases during wake and execution.
+    #[test]
+    fn voice_feedback_records_phrases_during_wake_and_execution() {
+        let mut frames = utterance_frames();
+        frames.extend(utterance_frames());
+
+        let result = run_script(
+            frames,
+            vec![Some("Reach"), Some("scroll down")],
+            Duration::ZERO,
+            false,
+        );
+
+        assert_eq!(result.phrases, vec![Phrase::Listening, Phrase::Done]);
+    }
+
+    /// Tests that voice feedback records confirmation prompt and cancellation.
+    #[test]
+    fn voice_feedback_records_confirming_and_cancelled() {
+        let mut frames = utterance_frames();
+        frames.extend(utterance_frames());
+
+        let result = run_script(
+            frames,
+            vec![Some("Reach click submit"), Some("no")],
+            Duration::from_secs(1),
+            false,
+        );
+
+        assert_eq!(
+            result.phrases,
+            vec![
+                Phrase::Confirming(ActionLabel::Submit),
+                Phrase::Cancelled
+            ]
+        );
+    }
+
+    /// Tests that FeedbackWriter speak explicitly pauses, speaks, and resumes.
+    #[test]
+    fn feedback_writer_speak_pauses_and_resumes_mic() {
+        let control = ScriptedControl::default();
+        let speaker = NullSpeaker::new();
+        let recorded = speaker.clone();
+        let mut output = Vec::new();
+        let mut feedback = FeedbackWriter::new(&mut output, Box::new(control.clone()), Box::new(speaker));
+
+        assert_eq!(control.pause_count(), 0);
+        assert_eq!(control.resume_count(), 0);
+
+        feedback.speak(Phrase::Listening);
+
+        assert_eq!(control.pause_count(), 1);
+        assert_eq!(control.resume_count(), 1);
+        assert_eq!(recorded.phrases(), vec![Phrase::Listening]);
     }
 }
