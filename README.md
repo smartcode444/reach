@@ -4,6 +4,7 @@
 
 Everything runs strictly on-device. Audio, transcripts, and screen context never leave the machine. There are no cloud calls, no telemetry, no local HTTP servers, and no background daemon processes.
 
+**Demo video link:** https://drive.google.com/file/d/1kNpJpsfZPbPY0J4s7MJGl8-6DMAPv0oa/view?usp=sharing
 ---
 
 ## 1. Architecture
