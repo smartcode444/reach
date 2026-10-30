@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use nlu::IntentModel;
 use reach_core::Executor;
 
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, StepOutcome};
 use crate::status::{ErrorKind, StatusEvent};
 
 /// How often the worker re-checks the listening window while waiting for input.
@@ -92,15 +92,6 @@ pub fn run_worker<M: IntentModel, E: Executor>(
             return finish(status, WorkerEnd::Exited);
         }
 
-        if status
-            .send(StatusEvent::Heard {
-                text: utterance.to_owned(),
-            })
-            .is_err()
-        {
-            return WorkerEnd::StatusClosed;
-        }
-
         let now = Instant::now();
         let mut reader = ChannelReader::new(lines);
         let mut writer = NullWriter;
@@ -128,8 +119,13 @@ pub fn run_worker<M: IntentModel, E: Executor>(
         }
 
         // A bare wake word leaves the listening window open; the pipeline has
-        // already reported `Listening`. Every other line returns to asleep.
-        if !pipeline.is_listening(now) && status.send(StatusEvent::Asleep).is_err() {
+        // already reported `Listening`. When an action ran, it is held on screen
+        // instead of immediately returning to asleep.
+        let executed_action = matches!(result, Ok(StepOutcome::Handled { executed: true, .. }));
+        if !executed_action
+            && !pipeline.is_listening(now)
+            && status.send(StatusEvent::Asleep).is_err()
+        {
             return WorkerEnd::StatusClosed;
         }
     }
@@ -364,9 +360,9 @@ mod tests {
         );
     }
 
-    /// A command that needs no confirmation runs and reports its action.
+    /// A compound wake+command utterance emits Listening before Heard and Action.
     #[test]
-    fn command_emits_action_then_asleep() {
+    fn compound_wake_command_emits_listening_before_heard_and_action() {
         let (end, events, intents) = run_script(&["Reach scroll down"], FakeExecutor::ok());
         let intent = Intent::Scroll {
             direction: Direction::Down,
@@ -378,16 +374,93 @@ mod tests {
             events,
             vec![
                 StatusEvent::Asleep,
+                StatusEvent::Listening,
                 StatusEvent::Heard {
                     text: "Reach scroll down".to_owned(),
                 },
                 StatusEvent::Action {
                     label: format_intent_action(&intent),
                 },
-                StatusEvent::Asleep,
                 StatusEvent::Stopped,
             ]
         );
+    }
+
+    /// After Action is emitted, Asleep is not emitted immediately in the same worker step.
+    #[test]
+    fn action_does_not_immediately_emit_asleep_in_same_step() {
+        let (line_sender, line_receiver) = mpsc::channel();
+        let (status_sender, status_receiver) = mpsc::channel();
+        let mut pipeline = Pipeline::new(DisabledModel, FakeExecutor::ok(), false);
+
+        // Send one compound command, but keep channel open to inspect step output
+        line_sender.send("Reach scroll down".to_owned()).unwrap();
+
+        let worker_thread =
+            std::thread::spawn(move || run_worker(&mut pipeline, &line_receiver, &status_sender));
+
+        std::thread::sleep(Duration::from_millis(150));
+        let events: Vec<StatusEvent> = status_receiver.try_iter().collect();
+
+        let action_idx = events
+            .iter()
+            .position(|e| matches!(e, StatusEvent::Action { .. }));
+        assert!(
+            action_idx.is_some(),
+            "expected Action event, got: {events:?}"
+        );
+        let has_asleep_after_action = events[action_idx.unwrap()..]
+            .iter()
+            .any(|e| matches!(e, StatusEvent::Asleep));
+        assert!(
+            !has_asleep_after_action,
+            "Asleep was emitted immediately after Action in the same step: {events:?}"
+        );
+
+        drop(line_sender);
+        let _ = worker_thread.join();
+    }
+
+    /// With an execution delay, Listening and Heard are emitted before the executor runs.
+    #[test]
+    fn execution_delay_emits_status_before_running() {
+        let (line_sender, line_receiver) = mpsc::channel();
+        let (status_sender, status_receiver) = mpsc::channel();
+        let mut pipeline = Pipeline::new(DisabledModel, FakeExecutor::ok(), false)
+            .with_execution_delay(Duration::from_millis(100));
+
+        line_sender.send("Reach scroll down".to_owned()).unwrap();
+
+        let worker_thread =
+            std::thread::spawn(move || run_worker(&mut pipeline, &line_receiver, &status_sender));
+
+        // After 25ms (well before the 100ms delay elapses), Listening and Heard must already be emitted,
+        // but Action must not yet be emitted.
+        std::thread::sleep(Duration::from_millis(25));
+        let early_events: Vec<StatusEvent> = status_receiver.try_iter().collect();
+        assert!(early_events.contains(&StatusEvent::Listening));
+        assert!(
+            early_events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Heard { .. }))
+        );
+        assert!(
+            !early_events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { .. }))
+        );
+
+        // After the remaining delay, Action arrives.
+        std::thread::sleep(Duration::from_millis(125));
+        let later_events: Vec<StatusEvent> = status_receiver.try_iter().collect();
+        assert!(
+            later_events
+                .iter()
+                .any(|e| matches!(e, StatusEvent::Action { .. }))
+        );
+
+        drop(line_sender);
+        let _ = worker_thread.join();
     }
 
     /// Speech without the wake word returns the window to asleep.
@@ -417,6 +490,7 @@ mod tests {
             events,
             vec![
                 StatusEvent::Asleep,
+                StatusEvent::Listening,
                 StatusEvent::Heard {
                     text: "Reach tell me a joke".to_owned(),
                 },
@@ -440,6 +514,7 @@ mod tests {
             events,
             vec![
                 StatusEvent::Asleep,
+                StatusEvent::Listening,
                 StatusEvent::Heard {
                     text: "Reach click Submit".to_owned(),
                 },
@@ -447,7 +522,6 @@ mod tests {
                     label: label.clone()
                 },
                 StatusEvent::Action { label },
-                StatusEvent::Asleep,
                 StatusEvent::Stopped,
             ]
         );
@@ -465,6 +539,7 @@ mod tests {
             events,
             vec![
                 StatusEvent::Asleep,
+                StatusEvent::Listening,
                 StatusEvent::Heard {
                     text: "Reach click Submit".to_owned(),
                 },
