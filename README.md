@@ -190,6 +190,12 @@ Reach controls a real PC on behalf of a person who may have no physical way to i
 - **Needle 3 Model Weights:**
   - Model file: `models/needle3.cact`.
   - License: **Apache-2.0**.
+- **OpenAI Whisper-base:**
+  - Repository: [https://huggingface.co/openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny)
+  - License: **Apache-2.0**
+- **OpenAI Whisper-tiny:**
+  - Repository: [https://huggingface.co/openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny)
+  - License: **Apache-2.0**
 - **Reach Project:**
   - Developed by Team Thinkers for hands-free Windows accessibility.
 
