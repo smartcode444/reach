@@ -422,7 +422,9 @@ impl<M: IntentModel, E: Executor> Pipeline<M, E> {
                 self.execute(&intent, io)?;
                 Ok(true)
             }
-            Some(Intent::Deny) => {
+            // "cancel", "stop" and "abort" are control intents rather than
+            // `Deny`, but they mean the same thing at a confirmation prompt.
+            Some(Intent::Deny) | Some(Intent::Cancel) => {
                 writeln!(io.output, "cancelled")?;
                 Ok(false)
             }

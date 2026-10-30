@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod executor;
+pub mod listen;
 pub mod pipeline;
 
 use std::io;
@@ -41,6 +42,9 @@ fn main() {
 /// Returns a message for an unknown pipeline option, a model or executor load
 /// failure, or an I/O failure.
 fn run(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) == Some("listen") {
+        return listen::run(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("pipeline") {
         return run_pipeline(&args[1..]);
     }
@@ -116,14 +120,7 @@ fn run_pipeline(args: &[String]) -> Result<(), String> {
 
     // The model is loaded once, before the first line, so interactive runs do
     // not pay the load cost again.
-    let model = if parsed.model {
-        let path = parsed.model_path.as_deref().unwrap_or(DEFAULT_MODEL_PATH);
-        let model = NeedleIntentModel::load(path, NeedleConfig::default())
-            .map_err(|error| format!("failed to load Needle model: {error}"))?;
-        CliModel::Needle(Box::new(model))
-    } else {
-        CliModel::Offline
-    };
+    let model = load_cli_model(parsed.model, parsed.model_path.as_deref())?;
 
     let executor = if parsed.dry_run {
         CliExecutor::DryRun
@@ -139,8 +136,30 @@ fn run_pipeline(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Loads the selected intent model, or returns the offline stand-in.
+///
+/// # Arguments
+/// * `model` - Whether the user asked for the Needle model.
+/// * `model_path` - An optional explicit model path; the default is used when
+///   it is absent.
+///
+/// # Returns
+/// [`CliModel::Needle`] when `model` is true, otherwise [`CliModel::Offline`].
+///
+/// # Errors
+/// Returns a load error when the model file cannot be opened or initialised.
+pub(crate) fn load_cli_model(model: bool, model_path: Option<&str>) -> Result<CliModel, String> {
+    if !model {
+        return Ok(CliModel::Offline);
+    }
+    let path = model_path.unwrap_or(DEFAULT_MODEL_PATH);
+    let model = NeedleIntentModel::load(path, NeedleConfig::default())
+        .map_err(|error| format!("failed to load Needle model: {error}"))?;
+    Ok(CliModel::Needle(Box::new(model)))
+}
+
 /// The executor chosen for one CLI run.
-enum CliExecutor {
+pub(crate) enum CliExecutor {
     /// The real desktop executor.
     Real(CompositeExecutor),
     /// A placeholder used by dry runs; it refuses to execute.

@@ -118,6 +118,34 @@ fn press_with_modifier<S: KeySink>(
 /// Flag tracking whether the global panic hook has been registered.
 static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Releases every key and mouse button Reach may have left pressed.
+///
+/// This is the emergency release used by the panic hook and by the CLI's
+/// Ctrl+C handler. It is best effort: if the platform injector cannot be
+/// initialized there is nothing useful to release, so the error is ignored
+/// rather than allowed to mask the original failure.
+pub fn release_all_keys() {
+    if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        for key in [
+            EnigoKey::Control,
+            EnigoKey::Shift,
+            EnigoKey::Alt,
+            EnigoKey::Meta,
+        ] {
+            let _ = enigo.key(key, EnigoDirection::Release);
+        }
+        for button in [
+            Button::Left,
+            Button::Middle,
+            Button::Right,
+            Button::Back,
+            Button::Forward,
+        ] {
+            let _ = enigo.button(button, EnigoDirection::Release);
+        }
+    }
+}
+
 /// Installs a global panic hook ensuring simulated modifier keys are released.
 ///
 /// Safe to call multiple times; only installs once.
@@ -125,12 +153,7 @@ pub fn install_panic_key_release_hook() {
     if !PANIC_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            // Attempt emergency release of common modifier keys.
-            if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                let _ = enigo.key(EnigoKey::Control, EnigoDirection::Release);
-                let _ = enigo.key(EnigoKey::Shift, EnigoDirection::Release);
-                let _ = enigo.key(EnigoKey::Alt, EnigoDirection::Release);
-            }
+            release_all_keys();
             prev_hook(info);
         }));
     }

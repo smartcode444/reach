@@ -533,11 +533,14 @@ dependencies = [
 name = "cli"
 version = "0.1.0"
 dependencies = [
+ "audio",
  "exec",
  "nlu",
  "reach-core",
  "screen",
  "serde_json",
+ "stt",
+ "windows 0.62.2",
 ]
 
 [[package]]
