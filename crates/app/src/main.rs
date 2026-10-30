@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use reach_runtime::{
     CompositeExecutor, ErrorKind, Pipeline, PipelineModel, StatusEvent, run_worker,
@@ -35,6 +36,12 @@ use tauri::{Emitter, Manager, PhysicalPosition, WebviewWindow};
 /// TODO(config): read the path from the TOML configuration once that crate
 /// exists, instead of probing the working directory.
 const DEFAULT_MODEL_PATH: &str = "models/needle3.cact";
+
+/// How long the worker pauses before executing a typed command.
+///
+/// This delay gives the user time to click the target window after typing a
+/// command into the console and pressing Enter.
+const TYPED_COMMAND_DELAY: Duration = Duration::from_secs(3);
 
 /// The event name the status window listens for.
 const STATUS_EVENT: &str = "reach-status";
@@ -288,7 +295,8 @@ fn spawn_worker(lines: Receiver<String>, status: Sender<StatusEvent>) {
             }
         };
 
-        let mut pipeline = Pipeline::new(model, executor, false);
+        let mut pipeline =
+            Pipeline::new(model, executor, false).with_execution_delay(TYPED_COMMAND_DELAY);
         let _ = run_worker(&mut pipeline, &lines, &status);
     });
 }

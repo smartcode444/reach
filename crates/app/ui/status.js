@@ -25,6 +25,15 @@ let currentState = "asleep";
 let lastSeq = -1;
 let pendingEnvelopes = [];
 let ready = false;
+let actionHoldTimer = null;
+
+// Clears any pending timer that would transition Action to Asleep.
+function clearActionHold() {
+  if (actionHoldTimer !== null) {
+    clearTimeout(actionHoldTimer);
+    actionHoldTimer = null;
+  }
+}
 
 // Applies the colour shared by the card border and the indicator.
 function setTone(tone) {
@@ -58,11 +67,24 @@ function applyStatus(status) {
 
   switch (status.type) {
     case "listening":
+      clearActionHold();
       setState("LISTENING", "listening", "listening");
       setResult("Listening for your command.");
       break;
     case "asleep": {
       const previousState = currentState;
+      if (previousState === "action") {
+        // Keep the Action result visible for 2 seconds before returning to Asleep.
+        clearActionHold();
+        actionHoldTimer = setTimeout(() => {
+          actionHoldTimer = null;
+          if (currentState === "action") {
+            setState("ASLEEP", "asleep", "asleep");
+          }
+        }, 2000);
+        break;
+      }
+      clearActionHold();
       setState("ASLEEP", "asleep", "asleep");
       // Keep the last action or clarification answer visible, but do not leave
       // a stale confirmation prompt or "listening" instruction on screen.
@@ -74,21 +96,26 @@ function applyStatus(status) {
       break;
     }
     case "heard":
+      clearActionHold();
       setHeard(status.text || "");
       break;
     case "action":
+      clearActionHold();
       setState("DONE", "listening", "action");
       setResult(status.label || "Action completed.");
       break;
     case "confirming":
+      clearActionHold();
       setState("CONFIRM?", "confirming", "confirming");
       setResult(`Say yes or no: ${status.label || "action"}`);
       break;
     case "not_understood":
+      clearActionHold();
       setState("NOT UNDERSTOOD", "confirming", "not_understood");
       setResult("Please say it another way.");
       break;
     case "stopped":
+      clearActionHold();
       // A startup model or executor failure is followed by `Stopped`. Keep
       // the error visible instead of masking it with a generic stop caption.
       if (currentState === "error") {
@@ -99,6 +126,7 @@ function applyStatus(status) {
       }
       break;
     case "error":
+      clearActionHold();
       setState("ERROR", "error", "error");
       setResult(ERROR_MESSAGES[status.kind] || "Something went wrong.");
       break;
