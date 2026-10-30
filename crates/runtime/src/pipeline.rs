@@ -11,7 +11,7 @@
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nlu::tools::ToolSpec;
 use nlu::wake::{GateResult, WakeConfig, WakeSession};
@@ -154,6 +154,8 @@ pub struct Pipeline<M, E> {
     executor: E,
     /// When true, routes are returned without executing.
     dry_run: bool,
+    /// Optional delay before running an accepted command.
+    execution_delay: Duration,
 }
 
 impl<M, E> Pipeline<M, E> {
@@ -189,7 +191,36 @@ impl<M, E> Pipeline<M, E> {
             model,
             executor,
             dry_run,
+            execution_delay: Duration::ZERO,
         }
+    }
+
+    /// Sets an execution delay and returns the pipeline.
+    ///
+    /// # Arguments
+    /// * `delay` - How long to pause before calling the executor.
+    ///
+    /// # Returns
+    /// The updated [`Pipeline`].
+    pub fn with_execution_delay(mut self, delay: Duration) -> Self {
+        self.execution_delay = delay;
+        self
+    }
+
+    /// Sets how long to wait before executing an accepted command.
+    ///
+    /// # Arguments
+    /// * `delay` - How long to pause before calling the executor.
+    pub fn set_execution_delay(&mut self, delay: Duration) {
+        self.execution_delay = delay;
+    }
+
+    /// Returns the configured execution delay.
+    ///
+    /// # Returns
+    /// The pause duration before command execution.
+    pub fn execution_delay(&self) -> Duration {
+        self.execution_delay
     }
 
     /// Returns the executor so tests can inspect what ran.
@@ -326,17 +357,30 @@ impl<M: IntentModel, E: Executor> Pipeline<M, E> {
         output: &mut dyn Write,
         status: &mut dyn FnMut(StatusEvent),
     ) -> io::Result<StepOutcome> {
+        let was_listening = self.session.is_open(now);
         match self.session.evaluate(transcript, now) {
             GateResult::Ignored => {
                 writeln!(output, "ignored")?;
+                status(StatusEvent::Heard {
+                    text: transcript.to_owned(),
+                });
                 Ok(StepOutcome::Ignored)
             }
             GateResult::WakeOnly => {
                 writeln!(output, "listening")?;
+                status(StatusEvent::Heard {
+                    text: transcript.to_owned(),
+                });
                 status(StatusEvent::Listening);
                 Ok(StepOutcome::WakeOnly)
             }
             GateResult::Command(command) => {
+                if !was_listening {
+                    status(StatusEvent::Listening);
+                }
+                status(StatusEvent::Heard {
+                    text: transcript.to_owned(),
+                });
                 let route = route_utterance(&command, &mut self.model);
                 let chosen_intent = match &route {
                     Route::Run(intent) | Route::Confirm(intent) => Some(intent.clone()),
@@ -396,6 +440,9 @@ impl<M: IntentModel, E: Executor> Pipeline<M, E> {
         output: &mut dyn Write,
         status: &mut dyn FnMut(StatusEvent),
     ) -> io::Result<bool> {
+        if !self.execution_delay.is_zero() {
+            std::thread::sleep(self.execution_delay);
+        }
         match self.executor.run(intent) {
             Ok(message) => {
                 writeln!(output, "{message}")?;
