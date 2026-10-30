@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 reach-core = { version = "0.1.0", path = "../core" }
+thiserror = "2.0.21"
 whisper-rs = "0.16.0"
 
 [lints]
